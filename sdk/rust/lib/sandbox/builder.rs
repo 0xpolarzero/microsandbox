@@ -28,8 +28,8 @@ use super::{
     },
 };
 use crate::{
-    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason,
-    config::LocalConfig, size::Mebibytes, snapshot::SnapshotReference,
+    LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Mebibytes,
+    snapshot::SnapshotReference,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -237,13 +237,6 @@ impl SandboxBuilder {
         self.config.spec.image = RootfsSource::oci("");
         self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
         self.pending_snapshot_from_config = false;
-        self
-    }
-
-    pub(super) fn config_snapshot(mut self, snapshot: impl Into<String>) -> Self {
-        self.config.spec.image = RootfsSource::oci("");
-        self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
-        self.pending_snapshot_from_config = true;
         self
     }
 

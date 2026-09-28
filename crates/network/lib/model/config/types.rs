@@ -7,7 +7,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::{HttpConfig, NetworkRateLimiterConfig, TlsConfig};
+use microsandbox_types::{
+    HttpConfig, NetworkRateLimiterConfig, TlsConfig, WELL_KNOWN_NAT64_PREFIX,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -82,6 +84,10 @@ pub struct NetworkConfig {
     /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
+
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    pub nat64_prefixes: Vec<Ipv6Network>,
 
     /// Ship the host's trusted root CAs into the guest at boot so outbound
     /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
@@ -283,6 +289,7 @@ impl Default for NetworkConfig {
             max_tcp_connections: None,
             max_udp_connections: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             http: HttpConfig::default(),
             outbound_proxy: None,
@@ -314,6 +321,14 @@ fn default_host_bind() -> IpAddr {
 
 fn default_query_timeout_ms() -> u64 {
     5000
+}
+
+fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
 }
 
 //--------------------------------------------------------------------------------------------------

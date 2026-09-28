@@ -532,6 +532,8 @@ export declare class NetworkBuilder {
   ipv4Pool(pool: string): this
   /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
   ipv6Pool(pool: string): this
+  /** Add a NAT64 /96 prefix for policy classification. */
+  nat64Prefix(prefix: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /** Configure HTTP denial responses via a callback. */

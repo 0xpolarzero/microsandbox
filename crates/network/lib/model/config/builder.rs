@@ -347,6 +347,23 @@ impl NetworkBuilder {
         self
     }
 
+    /// Add a NAT64 `/96` prefix.
+    ///
+    /// Destinations inside NAT64 prefixes are evaluated against both
+    /// their IPv6 address and the embedded IPv4 address. The well-known
+    /// `64:ff9b::/96` prefix is configured by default.
+    pub fn nat64_prefix(mut self, prefix: Ipv6Network) -> Self {
+        if prefix.prefix() != 96 {
+            self.errors.push(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
+        } else if !self.config.nat64_prefixes.contains(&prefix) {
+            self.config.nat64_prefixes.push(prefix);
+        }
+
+        self
+    }
+
     /// Whether to ship the host's trusted root CAs into the guest at
     /// boot. Default: false. Opt in when running behind a corporate
     /// TLS-inspecting proxy (Cloudflare Warp Zero Trust, Zscaler,
@@ -395,6 +412,16 @@ impl NetworkBuilder {
     pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
         if let Some(err) = self.errors.drain(..).next() {
             return Err(err);
+        }
+        if let Some(prefix) = self
+            .config
+            .nat64_prefixes
+            .iter()
+            .find(|prefix| prefix.prefix() != 96)
+        {
+            return Err(BuildError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
         }
         if self.config.tls.enabled
             && (self.config.tls.intercept_ca.cert_path.is_some()
@@ -1003,6 +1030,16 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, BuildError::IncompleteInterceptCaConfig));
+    }
+
+    #[test]
+    fn network_builder_rejects_non_96_nat64_prefix() {
+        let err = NetworkBuilder::new()
+            .nat64_prefix("64:ff9b::/64".parse().unwrap())
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(err, BuildError::InvalidNat64Prefix { .. }));
     }
 
     #[test]

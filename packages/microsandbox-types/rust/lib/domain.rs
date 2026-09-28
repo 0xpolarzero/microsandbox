@@ -29,6 +29,9 @@ pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
 /// Default metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
+/// The well-known NAT64 prefix from RFC 6052.
+pub const WELL_KNOWN_NAT64_PREFIX: &str = "64:ff9b::/96";
+
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
 //--------------------------------------------------------------------------------------------------
@@ -639,6 +642,10 @@ pub struct NetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
+
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    pub nat64_prefixes: Vec<Ipv6Network>,
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
@@ -1826,11 +1833,20 @@ impl Default for NetworkSpec {
             max_tcp_connections: None,
             max_udp_connections: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             outbound_proxy: None,
             http: HttpConfig::default(),
         }
     }
+}
+
+pub(crate) fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
 }
 
 impl Default for PublishedPortSpec {

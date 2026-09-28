@@ -1113,6 +1113,7 @@ export interface NapiNetworkBuilder {
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
+  nat64Prefix(prefix: string): this;
   trustHostCAs(enabled: boolean): this;
   http(configure: (h: NapiHttpBuilder) => NapiHttpBuilder): this;
   rateLimiter(

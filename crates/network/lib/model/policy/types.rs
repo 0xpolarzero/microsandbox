@@ -1031,7 +1031,7 @@ fn matches_egress_destination_with_source(
 ) -> DestinationMatch {
     match dest {
         Destination::Any => DestinationMatch::Match,
-        Destination::Cidr(network) => matches_cidr(network, addr).into(),
+        Destination::Cidr(network) => matches_cidr(network, addr, shared).into(),
         Destination::Group(group) => matches_group(*group, addr, shared).into(),
         Destination::Domain(domain) => match source {
             HostnameSource::Sni(name) => {
@@ -1570,6 +1570,19 @@ mod tests {
             policy.evaluate_egress(v6, Protocol::Tcp, &shared),
             Action::Deny,
             "default policy should deny host via IPv6 gateway (ULA fd42::/8)"
+        );
+    }
+
+    #[test]
+    fn public_profile_denies_private_ipv4_through_nat64() {
+        let shared = SharedState::new(4);
+        shared.set_nat64_prefixes(vec!["2001:db8:64::/96".parse().unwrap()]);
+        let policy = NetworkPolicy::from_profiles([NetworkProfile::Public]);
+        let dst = sock("2001:db8:64::a00:2", 80);
+
+        assert_eq!(
+            policy.evaluate_egress(dst, Protocol::Tcp, &shared),
+            Action::Deny
         );
     }
 

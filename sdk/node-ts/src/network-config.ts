@@ -133,6 +133,7 @@ export interface NetworkConfig {
     readonly mac?: readonly number[] | null;
     readonly mtu?: number | null;
   };
+  readonly nat64Prefixes: readonly string[];
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;

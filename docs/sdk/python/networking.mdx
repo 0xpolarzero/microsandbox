@@ -23,6 +23,7 @@ Network(
     strict: bool = True,
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
+    nat64_prefixes: tuple[str, ...] = ("64:ff9b::/96",),
     max_tcp_connections: int | None = None,
     max_udp_connections: int | None = None,
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
@@ -83,6 +84,12 @@ IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`
 `str \| None` · Default: `None`
 
 IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefixes</span>
+
+`tuple[str, ...]` · Default: `("64:ff9b::/96",)`
+
+NAT64 `/96` prefixes for policy classification. Destinations inside these prefixes are also evaluated by their embedded IPv4 address.
 
 #### max_udp_connections
 

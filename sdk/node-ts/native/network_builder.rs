@@ -284,6 +284,17 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Add a NAT64 /96 prefix for policy classification.
+    #[napi(js_name = "nat64Prefix")]
+    pub fn nat64_prefix(&mut self, prefix: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&prefix).map_err(|e| {
+            napi::Error::from_reason(format!("invalid NAT64 prefix `{prefix}`: {e}"))
+        })?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.nat64_prefix(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {

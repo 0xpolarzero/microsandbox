@@ -874,6 +874,23 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefix()</span>
+
+```rust
+fn nat64_prefix(self, prefix: Ipv6Network) -> Self
+```
+
+Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 prefixes are evaluated against both their IPv6 address and the embedded IPv4 address, so translated private, loopback, link-local, and metadata IPv4 addresses retain their normal policy groups. The well-known `64:ff9b::/96` prefix is configured by default.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>prefix</code><span className="msb-type">Ipv6Network</span></div>
+    <div className="msb-param-desc">NAT64 prefix. Must be an IPv6 <code>/96</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">max_udp_connections()</span>
 
 ```rust
@@ -1548,6 +1565,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidCidr { rule_index, raw }` | `.cidr(&str)` got an unparseable value |
 | `InvalidIpv4Pool { raw }` | `ipv4_pool()` got a pool that can't hold a `/30` sandbox subnet |
 | `InvalidIpv6Pool { raw }` | `ipv6_pool()` got a pool that can't hold a `/64` sandbox prefix |
+| `InvalidNat64Prefix { raw }` | `nat64_prefix()` got a prefix that is not an IPv6 `/96` |
 | `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
 | `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |

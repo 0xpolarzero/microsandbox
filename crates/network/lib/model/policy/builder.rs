@@ -86,6 +86,13 @@ pub enum BuildError {
     #[error("invalid IPv6 pool `{raw}`: prefix must be /64 or shorter")]
     InvalidIpv6Pool { raw: String },
 
+    /// A NAT64 prefix must be an IPv6 `/96` network.
+    #[error("invalid NAT64 prefix `{raw}`: prefix must be IPv6 /96")]
+    InvalidNat64Prefix {
+        /// Invalid raw prefix.
+        raw: String,
+    },
+
     /// An outbound proxy builder received an invalid configuration.
     #[error("invalid outbound proxy: {reason}")]
     InvalidOutboundProxy {

@@ -958,6 +958,9 @@ struct NetworkOpts {
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
+    /// NAT64 /96 prefixes for policy classification.
+    #[serde(default)]
+    nat64_prefixes: Vec<String>,
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
@@ -1402,6 +1405,12 @@ fn apply_network(
             .parse()
             .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
         builder = builder.network(|n| n.ipv6_pool(pool));
+    }
+    for raw in &net.nat64_prefixes {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            FfiError::invalid_argument(format!("nat64_prefixes entry {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
     }
 
     // DNS configuration. Either nested `dns: {...}` or the legacy flat

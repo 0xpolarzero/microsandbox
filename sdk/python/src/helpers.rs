@@ -1590,6 +1590,14 @@ fn apply_network(
         })?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in extract_opt::<Vec<String>>(net, "nat64_prefixes")?.unwrap_or_default() {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid nat64_prefixes entry {raw:?}: {e}"
+            ))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // Host-CA trust (ship host's extra CAs into the guest at boot).
     if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {

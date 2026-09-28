@@ -108,6 +108,13 @@ pub enum NetworkInitError {
         slot: u16,
     },
 
+    /// A configured NAT64 prefix is not an IPv6 `/96` network.
+    #[error("invalid NAT64 prefix `{raw}`: prefix must be IPv6 /96")]
+    InvalidNat64Prefix {
+        /// Invalid raw prefix.
+        raw: String,
+    },
+
     /// TLS interception state failed to initialize.
     #[error("TLS initialization failed: {0}")]
     Tls(#[from] TlsStateError),
@@ -254,6 +261,16 @@ impl SmoltcpNetwork {
         if let Some(message) = config.http.deny_message.as_deref() {
             shared.set_http_deny_message(message);
         }
+        if let Some(prefix) = config
+            .nat64_prefixes
+            .iter()
+            .find(|prefix| prefix.prefix() != 96)
+        {
+            return Err(NetworkInitError::InvalidNat64Prefix {
+                raw: prefix.to_string(),
+            });
+        }
+        shared.set_nat64_prefixes(config.nat64_prefixes.clone());
         // Every write path validates rate limiters (`NetworkBuilder::build`),
         // but a stored config bypasses the builder: fail startup cleanly
         // instead of panicking on a corrupted spec.

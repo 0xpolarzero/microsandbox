@@ -12,6 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
+use ipnetwork::Ipv6Network;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
@@ -78,6 +79,9 @@ pub struct SharedState {
     /// Per-sandbox gateway IPv6. Set once at boot. See `gateway_ipv4`.
     gateway_ipv6: OnceLock<Ipv6Addr>,
 
+    /// NAT64 `/96` prefixes used by policy classification.
+    nat64_prefixes: OnceLock<Vec<Ipv6Network>>,
+
     /// Aggregate network byte counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 
@@ -126,6 +130,7 @@ impl SharedState {
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
+            nat64_prefixes: OnceLock::new(),
             metrics: NetworkMetrics::default(),
             http_deny_message: OnceLock::new(),
         }
@@ -168,6 +173,16 @@ impl SharedState {
             .map(String::as_str)
             .unwrap_or(DEFAULT_HTTP_DENY_MESSAGE);
         http_deny::render_http_deny_message(template, host)
+    }
+
+    /// Set NAT64 prefixes. Called once before policy evaluation starts.
+    pub fn set_nat64_prefixes(&self, prefixes: Vec<Ipv6Network>) {
+        let _ = self.nat64_prefixes.set(prefixes);
+    }
+
+    /// NAT64 prefixes used by policy classification.
+    pub fn nat64_prefixes(&self) -> &[Ipv6Network] {
+        self.nat64_prefixes.get().map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Install a host-side termination hook.

@@ -1181,6 +1181,10 @@ type NetworkConfig struct {
 	// Defaults to "fd42:6d73:62::/48".
 	IPv6Pool string
 
+	// NAT64Prefixes are NAT64 /96 prefixes used for policy classification.
+	// Defaults to "64:ff9b::/96".
+	NAT64Prefixes []string
+
 	// MaxConnections caps TCP connections.
 	// Deprecated: use MaxTCPConnections instead; specifying both is an error.
 	MaxConnections *uint

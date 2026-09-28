@@ -1780,6 +1780,8 @@ class Network:
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
+    nat64_prefixes: tuple[str, ...] = ("64:ff9b::/96",)
+    """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""
     max_tcp_connections: int | None = field(default=None, kw_only=True)
@@ -1844,6 +1846,8 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None and self.max_tcp_connections is not None:
             raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
+        if self.nat64_prefixes:
+            d["nat64_prefixes"] = list(self.nat64_prefixes)
         if self.max_connections is not None:
             warnings.warn(
                 "max_connections is deprecated; use max_tcp_connections",

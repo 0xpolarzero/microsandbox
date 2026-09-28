@@ -1825,6 +1825,7 @@ type NetworkOptions struct {
 	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
 	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
 	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
+	NAT64Prefixes         []string                   `json:"nat64_prefixes,omitempty"`
 	MaxConnections        *uint                      `json:"max_connections,omitempty"`
 	MaxTCPConnections     *uint                      `json:"max_tcp_connections,omitempty"`
 	MaxUDPConnections     *uint                      `json:"max_udp_connections,omitempty"`

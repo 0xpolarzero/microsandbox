@@ -699,6 +699,23 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
   </div>
 </div>
 
+#### <span className="msb-recv">.</span><span className="msb-hn">nat64Prefix()</span>
+
+```typescript
+nat64Prefix(prefix: string): this
+```
+
+Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 prefixes are evaluated against both their IPv6 address and the embedded IPv4 address. The well-known `64:ff9b::/96` prefix is configured by default.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>prefix</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">NAT64 IPv6 <code>/96</code> prefix.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv" id="nb-interface">network.</span><span className="msb-hn">interface()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -1859,6 +1876,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
+| nat64Prefixes | `readonly string[]` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
 | http | `{ denyMessage?: string \| null }` | HTTP denial settings; omitted or `null` message uses the default |

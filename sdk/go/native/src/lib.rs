@@ -968,6 +968,8 @@ struct NetworkOpts {
     secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+    /// Body returned to HTTP/HTTPS clients when egress is denied.
+    http: Option<microsandbox_network::config::HttpConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1517,6 +1519,16 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(message) = net
+        .http
+        .as_ref()
+        .and_then(|http| http.deny_message.as_ref())
+    {
+        let message = message.clone();
+        builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
     }
 
     // Sandbox-wide secret violation action.

@@ -396,6 +396,10 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		TrustHostCAs:          n.TrustHostCAs,
 	}
 
+	if n.HTTP != nil {
+		out.HTTP = &ffi.HTTPConfig{DenyMessage: n.HTTP.DenyMessage}
+	}
+
 	strict := !n.DisableStrict
 	out.Strict = &strict
 

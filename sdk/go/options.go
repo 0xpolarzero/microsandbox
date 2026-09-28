@@ -1198,6 +1198,16 @@ type NetworkConfig struct {
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
+
+	// HTTP configures HTTP denial responses.
+	HTTP *HTTPConfig
+}
+
+// HTTPConfig configures HTTP denial responses.
+type HTTPConfig struct {
+	// DenyMessage replaces the body for denied HTTP/HTTPS requests.
+	// "{host}" names the blocked host. Empty uses the default message.
+	DenyMessage string
 }
 
 // DNSConfig configures the in-VM DNS proxy.

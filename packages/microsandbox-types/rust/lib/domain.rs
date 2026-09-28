@@ -573,6 +573,18 @@ pub enum Patch {
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
+/// HTTP responses returned when network policy denies a request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct HttpConfig {
+    /// Denial response body. `{host}` names the blocked host.
+    /// Omission uses the default; an empty string produces an empty body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_message: Option<String>,
+}
+
 /// Complete network specification for a sandbox.
 ///
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
@@ -630,6 +642,10 @@ pub struct NetworkSpec {
 
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// HTTP denial response settings.
+    #[config_patch(nested)]
+    pub http: HttpConfig,
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
@@ -1812,6 +1828,7 @@ impl Default for NetworkSpec {
             rate_limiter: None,
             trust_host_cas: false,
             outbound_proxy: None,
+            http: HttpConfig::default(),
         }
     }
 }

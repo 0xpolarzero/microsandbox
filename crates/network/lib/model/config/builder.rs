@@ -15,7 +15,8 @@ use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
 
 use crate::config::{
-    ConnectionLimit, DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort,
+    ConnectionLimit, DnsConfig, HttpConfig, InterfaceOverrides, NetworkConfig, PortProtocol,
+    PublishedPort,
 };
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -32,6 +33,12 @@ use crate::secrets::config::{
 pub struct NetworkBuilder {
     config: NetworkConfig,
     errors: Vec<BuildError>,
+}
+
+/// Fluent builder for HTTP denial responses.
+#[derive(Default)]
+pub struct HttpBuilder {
+    config: HttpConfig,
 }
 
 /// Fluent builder for [`DnsConfig`].
@@ -109,6 +116,25 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl HttpBuilder {
+    /// Create HTTP settings with the default denial response.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
+    /// An empty message produces an empty body; omission uses the default.
+    pub fn deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.deny_message = Some(message.into());
+        self
+    }
+
+    /// Return the HTTP configuration.
+    pub fn build(self) -> HttpConfig {
+        self.config
+    }
+}
 
 impl NetworkBuilder {
     /// Start building a network configuration with defaults.
@@ -328,6 +354,15 @@ impl NetworkBuilder {
     /// unknown to the guest's stock Mozilla bundle.
     pub fn trust_host_cas(mut self, enabled: bool) -> Self {
         self.config.trust_host_cas = enabled;
+        self
+    }
+
+    /// Configure HTTP responses to denied requests.
+    pub fn http(mut self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self {
+        self.config.http = configure(HttpBuilder {
+            config: self.config.http,
+        })
+        .build();
         self
     }
 

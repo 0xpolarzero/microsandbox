@@ -26,6 +26,7 @@ Network(
     max_tcp_connections: int | None = None,
     max_udp_connections: int | None = None,
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+    http: HttpConfig | None = None,
 )
 ```
 
@@ -118,6 +119,18 @@ Ingress and egress rate limits
 [`ViolationAction`](/sdk/python/secrets#violationaction) · Default: `BLOCK_AND_LOG`
 
 Sandbox-wide action when a secret placeholder reaches a disallowed host
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">http</span>
+
+`HttpConfig | None` · Default: `None`
+
+HTTP denial response settings. `HttpConfig(deny_message="Blocked: {host}")` replaces the response body. `{host}` names the blocked hostname. A `None` message uses the default; an empty string sends no body. Requires a supporting local runtime; cloud rejects custom messages.
+
+```python
+from microsandbox import HttpConfig, Network
+
+network = Network(http=HttpConfig(deny_message="Blocked: {host}"))
+```
 
 #### <span className="msb-recv">Network.</span><span className="msb-hn">none()</span>
 

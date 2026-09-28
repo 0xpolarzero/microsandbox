@@ -8,6 +8,7 @@ use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 
 use crate::dns_builder::JsDnsBuilder;
+use crate::http_builder::JsHttpBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::rate_limiter_builder::{JsNetworkRateLimiterBuilder, RateLimiterValues};
@@ -289,6 +290,22 @@ impl JsNetworkBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.trust_host_cas(enabled));
         self
+    }
+
+    /// Configure HTTP denial responses via a callback.
+    #[napi]
+    pub fn http(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsHttpBuilder>, ClassInstance<JsHttpBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsHttpBuilder::new().into_instance(env)?;
+        let returned = configure.call(initial)?;
+        if let Some(message) = returned.message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_message(message)));
+        }
+        Ok(self)
     }
 
     /// Configure local egress and ingress rate limits. Applies on the next

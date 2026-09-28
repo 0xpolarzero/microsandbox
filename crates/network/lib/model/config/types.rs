@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
+use microsandbox_types::{HttpConfig, NetworkRateLimiterConfig, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -91,6 +91,10 @@ pub struct NetworkConfig {
     /// this is explicitly enabled. Default: false.
     #[serde(default)]
     pub trust_host_cas: bool,
+
+    /// HTTP denial response settings.
+    #[serde(default)]
+    pub http: HttpConfig,
 
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
@@ -280,6 +284,7 @@ impl Default for NetworkConfig {
             max_udp_connections: None,
             rate_limiter: None,
             trust_host_cas: false,
+            http: HttpConfig::default(),
             outbound_proxy: None,
         }
     }
@@ -423,6 +428,34 @@ mod tests {
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
         );
+    }
+
+    #[test]
+    fn http_config_uses_nested_wire_contract() {
+        for (raw, expected) in [
+            (r#"{}"#, None),
+            (r#"{"http":{}}"#, None),
+            (r#"{"http":{"deny_message":null}}"#, None),
+            (r#"{"http":{"deny_message":""}}"#, Some("")),
+            (
+                r#"{"http":{"deny_message":"blocked {host}"}}"#,
+                Some("blocked {host}"),
+            ),
+        ] {
+            let config: NetworkConfig = serde_json::from_str(raw).unwrap();
+            assert_eq!(config.http.deny_message.as_deref(), expected);
+            let wire = serde_json::to_value(&config).unwrap();
+            assert!(wire.get("http_deny_message").is_none());
+            assert_eq!(
+                wire["http"].get("deny_message"),
+                expected.map(serde_json::Value::from).as_ref()
+            );
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
+            assert_eq!(spec.http.deny_message.as_deref(), expected);
+            let restored: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(restored.http.deny_message.as_deref(), expected);
+        }
     }
 
     /// `outbound_proxy` round-trips whole-config through the wire type the

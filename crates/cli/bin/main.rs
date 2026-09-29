@@ -295,6 +295,7 @@ fn main() {
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
                     protocols: vec![2, 1],
                     required_restore_backing: true,
+                    tcp_accept_queue_size: true,
                     http_deny_message: cfg!(feature = "net"),
                 })
                 .expect("serialize capabilities")

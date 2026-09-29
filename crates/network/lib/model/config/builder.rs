@@ -663,6 +663,9 @@ impl SecretBuilder {
 
     /// Add a host allowed to receive the substituted secret value.
     ///
+    /// Once the secret's host and TLS identity checks pass, this host may also
+    /// receive unchanged placeholders outside enabled substitution locations.
+    ///
     /// `*.example.com` matches the domain and its subdomains. Use
     /// [`allow_any_host_dangerous`](Self::allow_any_host_dangerous) for `*`.
     pub fn allow(mut self, host: impl AsRef<str>) -> Self {

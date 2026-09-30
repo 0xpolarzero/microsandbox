@@ -222,16 +222,21 @@ class MicrosandboxTest < Test::Unit::TestCase
     script = <<~RUBY
       require "microsandbox"
       Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
+      settings = Microsandbox::HttpBuilder.new
+      settings.deny_message("dormant")
+      abort "message enabled responses" unless settings.response.nil?
+      settings.deny_response(true).deny_response(false)
+      abort "disable ignored" unless settings.response == false
       operations = [
-        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_message: "blocked {host}" }) },
-        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_message("blocked {host}") }.create }
+        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true }) },
+        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_message("blocked {host}") }.create }
       ]
       operations.each do |operation|
         begin
           operation.call
           abort "expected cloud to reject the local-only option"
         rescue Microsandbox::UnsupportedError => error
-          abort error.message unless error.message.include?("network.http.deny_message")
+          abort error.message unless error.message.include?("network.http.deny_response")
           puts "rejected"
         end
       end

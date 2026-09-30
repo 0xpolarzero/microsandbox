@@ -230,7 +230,9 @@ export type JsFsWriteSink = FsWriteSink
 export declare class HttpBuilder {
   /** Create default HTTP settings. */
   constructor()
-  /** Set the denial response body, substituting `{host}`. */
+  /** Enable readable HTTP denial responses. Disabled by default. */
+  denyResponse(enabled: boolean): this
+  /** Set the body used when denyResponse is enabled, substituting `{host}`. */
   denyMessage(message: string): this
 }
 export type JsHttpBuilder = HttpBuilder

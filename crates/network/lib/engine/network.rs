@@ -258,9 +258,7 @@ impl SmoltcpNetwork {
         // Packet queue capacity is independent of the optional connection cap:
         // a large cap must not allocate a correspondingly large packet queue.
         let shared = Arc::new(SharedState::new(DEFAULT_QUEUE_CAPACITY));
-        if let Some(message) = config.http.deny_message.as_deref() {
-            shared.set_http_deny_message(message);
-        }
+        shared.set_http_config(config.http.clone());
         if let Some(prefix) = config
             .nat64_prefixes
             .iter()

@@ -1631,6 +1631,9 @@ fn apply_network(
         && !http.is_none()
     {
         let http = http.downcast::<PyDict>()?;
+        if let Some(enabled) = extract_opt::<bool>(http, "deny_response")? {
+            builder = builder.network(move |n| n.http(|h| h.deny_response(enabled)));
+        }
         if let Some(message) = extract_opt::<String>(http, "deny_message")? {
             builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
         }

@@ -424,7 +424,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	if n.HTTP != nil {
-		out.HTTP = &ffi.HTTPConfig{DenyMessage: n.HTTP.DenyMessage}
+		out.HTTP = &ffi.HTTPConfig{DenyResponse: n.HTTP.DenyResponse, DenyMessage: n.HTTP.DenyMessage}
 	}
 
 	strict := !n.DisableStrict

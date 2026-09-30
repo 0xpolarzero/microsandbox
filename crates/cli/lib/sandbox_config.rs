@@ -409,6 +409,7 @@ struct NetworkConfigInput {
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
 #[serde(default, deny_unknown_fields)]
 struct HttpInput {
+    deny_response: Option<bool>,
     deny_message: Option<String>,
 }
 
@@ -1754,6 +1755,9 @@ fn materialize_network_patch(
     }
     if let Some(http) = input.http {
         let mut value = HttpConfigPatch::new();
+        if let Some(enabled) = http.deny_response {
+            value = value.deny_response(enabled);
+        }
         if let Some(message) = http.deny_message {
             value = value.deny_message(message);
         }
@@ -2638,6 +2642,7 @@ network:
   strict: true
   max_tcp_connections: 64
   http:
+    deny_response: true
     deny_message: "Blocked: {host}"
 secrets:
   TOKEN:
@@ -2671,6 +2676,7 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert!(config.spec.network.http.deny_response);
         assert_eq!(
             config.spec.network.http.deny_message.as_deref(),
             Some("Blocked: {host}")

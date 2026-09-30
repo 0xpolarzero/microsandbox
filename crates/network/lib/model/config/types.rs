@@ -523,6 +523,7 @@ mod tests {
         ] {
             let config: NetworkConfig = serde_json::from_str(raw).unwrap();
             assert_eq!(config.http.deny_message.as_deref(), expected);
+            assert!(!config.http.deny_response);
             let wire = serde_json::to_value(&config).unwrap();
             assert!(wire.get("http_deny_message").is_none());
             assert_eq!(

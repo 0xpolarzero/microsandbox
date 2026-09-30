@@ -288,6 +288,10 @@ pub(crate) async fn serve_tls_deny(
     shared: &SharedState,
     tls_state: &TlsState,
 ) -> io::Result<()> {
+    if !shared.http_deny_response_enabled() {
+        return Ok(());
+    }
+
     let domain_cert = tls_state
         .get_or_generate_cert(sni_name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -729,7 +733,7 @@ mod tests {
     use super::*;
     use crate::secrets::{config::SecretsConfig, handle::SecretsHandle};
 
-    async fn tls_denial_response(chunks: &[&[u8]], close_input: bool) -> Vec<u8> {
+    async fn tls_denial_response(chunks: &[&[u8]], close_input: bool, enabled: bool) -> Vec<u8> {
         let state = TlsState::new(
             microsandbox_types::TlsConfig::default(),
             SecretsHandle::new(SecretsConfig::default()),
@@ -751,6 +755,10 @@ mod tests {
         let (to_tx, mut to_rx) = mpsc::channel(16);
         let server = tokio::spawn(async move {
             let shared = SharedState::new(16);
+            shared.set_http_config(microsandbox_types::HttpConfig {
+                deny_response: enabled,
+                ..Default::default()
+            });
             serve_tls_deny(
                 "blocked.example",
                 hello,
@@ -766,6 +774,10 @@ mod tests {
         let mut sender = Some(from_tx);
         let mut response = Vec::new();
         while let Some(data) = to_rx.recv().await {
+            assert!(
+                enabled,
+                "disabled responses must not complete a TLS handshake"
+            );
             let mut remaining = &data[..];
             while !remaining.is_empty() {
                 client.read_tls(&mut remaining).unwrap();
@@ -812,6 +824,15 @@ mod tests {
         response
     }
 
+    #[tokio::test]
+    async fn tls_denial_is_silent_without_opt_in() {
+        assert!(
+            tls_denial_response(&[b"GET / HTTP/1.1\r\n\r\n"], true, false)
+                .await
+                .is_empty()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn tls_denial_answers_fragmented_http1() {
         let response = tls_denial_response(
@@ -821,6 +842,7 @@ mod tests {
                 b"T / HTTP/1.1\r",
                 b"\nHost: blocked.example\r\n\r\n",
             ],
+            true,
             true,
         )
         .await;
@@ -836,12 +858,16 @@ mod tests {
             vec![b"GE".as_slice()],
             vec![],
         ] {
-            assert!(tls_denial_response(&chunks, true).await.is_empty());
+            assert!(tls_denial_response(&chunks, true, true).await.is_empty());
         }
     }
 
     #[tokio::test(start_paused = true)]
     async fn tls_denial_does_not_answer_after_timeout() {
-        assert!(tls_denial_response(&[b"GET /"], false).await.is_empty());
+        assert!(
+            tls_denial_response(&[b"GET /"], false, true)
+                .await
+                .is_empty()
+        );
     }
 }

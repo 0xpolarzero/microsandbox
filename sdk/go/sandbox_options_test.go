@@ -1136,8 +1136,13 @@ func TestNetworkStrictDefaultsAndOptOut(t *testing.T) {
 }
 
 func TestHTTPDenyMessageSurvivesFFIConversion(t *testing.T) {
-	config := buildFFINetwork(&NetworkConfig{HTTP: &HTTPConfig{DenyMessage: "blocked {host}"}})
-	if config.HTTP.DenyMessage != "blocked {host}" {
-		t.Fatalf("HTTP denial message lost: %q", config.HTTP.DenyMessage)
+	for _, enabled := range []bool{false, true} {
+		config := buildFFINetwork(&NetworkConfig{HTTP: &HTTPConfig{DenyResponse: enabled, DenyMessage: "blocked {host}"}})
+		if config.HTTP.DenyResponse != enabled {
+			t.Fatalf("HTTP denial response flag lost")
+		}
+		if config.HTTP.DenyMessage != "blocked {host}" {
+			t.Fatalf("HTTP denial message lost: %q", config.HTTP.DenyMessage)
+		}
 	}
 }

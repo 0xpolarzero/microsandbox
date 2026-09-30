@@ -1007,7 +1007,15 @@ describe("TCP accept queue size", () => {
 });
 
 describe("NetworkBuilder HTTP denial messages", () => {
-  it("preserves a custom message through the native builder", () => {
+  it("requires an explicit opt-in and preserves settings across callbacks", () => {
+    expect(new NetworkBuilder().build().http.denyResponse).toBe(false);
+    expect(new NetworkBuilder().http((h) => h.denyMessage("custom")).build().http.denyResponse).toBe(false);
+    const builder = new NetworkBuilder().http((h) => h.denyResponse(true));
+    expect(builder.build().http).toEqual({ denyResponse: true });
+    builder.http((h) => h.denyMessage("keep"));
+    expect(builder.build().http).toEqual({ denyResponse: true, denyMessage: "keep" });
+    builder.http((h) => h.denyResponse(false));
+    expect(builder.build().http).toEqual({ denyResponse: false, denyMessage: "keep" });
     expect(new NetworkBuilder().http((h) => h.denyMessage("blocked {host}")).build().http.denyMessage)
       .toBe("blocked {host}");
     expect(new NetworkBuilder().http((h) => h.denyMessage("")).build().http.denyMessage).toBe("");

@@ -322,6 +322,10 @@ impl JsNetworkBuilder {
     ) -> Result<&Self> {
         let initial = JsHttpBuilder::new().into_instance(env)?;
         let returned = configure.call(initial)?;
+        if let Some(enabled) = returned.response {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_response(enabled)));
+        }
         if let Some(message) = returned.message.clone() {
             let prev = self.take_inner();
             self.inner = Some(prev.http(|h| h.deny_message(message)));

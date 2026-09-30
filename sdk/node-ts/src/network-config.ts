@@ -140,9 +140,8 @@ export interface NetworkConfig {
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
   /**
-   * Body returned to HTTP/HTTPS clients when egress is denied by policy;
-   * `{host}` is replaced with the blocked hostname. `null` uses the
-   * engine default.
+   * HTTP denial responses are disabled by default. When enabled, denyMessage
+   * overrides the built-in body; `{host}` names the blocked hostname.
    */
-  readonly http: { readonly denyMessage?: string | null };
+  readonly http: { readonly denyResponse: boolean; readonly denyMessage?: string | null };
 }

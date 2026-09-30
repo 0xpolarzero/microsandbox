@@ -189,23 +189,22 @@ func TestCustomPolicyPortRange(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// The allowed port connects upstream. The denied port accepts the guest
-	// connection only to return the gateway's HTTP denial response.
+	// A denied port must still fail to connect unless HTTP responses are enabled.
 	out, err := sb.Shell(ctx,
 		"nc -zv -w 5 1.1.1.1 443 2>&1 || echo p443-failed; "+
-			"printf 'GET / HTTP/1.1\\r\\nHost: 1.1.1.1\\r\\n\\r\\n' | nc -w 5 1.1.1.1 80",
+			"nc -zv -w 5 1.1.1.1 80 2>&1 || echo p80-failed",
 		microsandbox.WithExecTimeout(20*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 	combined := out.Stdout() + out.Stderr()
 	if strings.Contains(combined, "p443-failed") {
-		t.Errorf("expected 443 in range to be allowed; got %q", combined)
+		t.Errorf("expected port 443 to be allowed; got %q", combined)
 	}
-	if !strings.Contains(combined, "HTTP/1.1 403 Forbidden") ||
-		!strings.Contains(combined, "not allowed by the sandbox network policy") {
-		t.Errorf("expected gateway policy denial for port 80 outside the range; got %q", combined)
+	if !strings.Contains(combined, "p80-failed") {
+		t.Errorf("expected port 80 to be blocked; got %q", combined)
 	}
+
 }
 
 // TestCustomPolicyMultiProtocol exercises the Vec<Protocol> wire shape via

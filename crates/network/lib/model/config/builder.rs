@@ -118,13 +118,20 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 
 impl HttpBuilder {
-    /// Create HTTP settings with the default denial response.
+    /// Create HTTP settings with denial responses disabled.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Enable readable HTTP denial responses. Disabled by default.
+    pub fn deny_response(mut self, enabled: bool) -> Self {
+        self.config.deny_response = enabled;
+        self
+    }
+
     /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
-    /// An empty message produces an empty body; omission uses the default.
+    /// Requires `deny_response(true)`. An empty message produces an empty body;
+    /// omission uses the default.
     pub fn deny_message(mut self, message: impl Into<String>) -> Self {
         self.config.deny_message = Some(message.into());
         self

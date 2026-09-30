@@ -9,6 +9,7 @@ use napi_derive::napi;
 #[derive(Default)]
 pub struct JsHttpBuilder {
     pub(crate) message: Option<String>,
+    pub(crate) response: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -23,7 +24,14 @@ impl JsHttpBuilder {
         Self::default()
     }
 
-    /// Set the denial response body, substituting `{host}`.
+    /// Enable readable HTTP denial responses. Disabled by default.
+    #[napi(js_name = "denyResponse")]
+    pub fn deny_response(&mut self, enabled: bool) -> &Self {
+        self.response = Some(enabled);
+        self
+    }
+
+    /// Set the body used when denyResponse is enabled, substituting `{host}`.
     #[napi(js_name = "denyMessage")]
     pub fn deny_message(&mut self, message: String) -> &Self {
         self.message = Some(message);

@@ -582,8 +582,12 @@ pub enum Patch {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct HttpConfig {
+    /// Return readable HTTP 403 responses for supported denied requests. Default: false.
+    pub deny_response: bool,
+
     /// Denial response body. `{host}` names the blocked host.
-    /// Omission uses the default; an empty string produces an empty body.
+    /// Used only when `deny_response` is enabled. Omission uses the default;
+    /// an empty string produces an empty body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deny_message: Option<String>,
 }

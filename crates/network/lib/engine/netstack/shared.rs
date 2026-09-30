@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
 use ipnetwork::Ipv6Network;
+use microsandbox_types::HttpConfig;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
@@ -85,9 +86,8 @@ pub struct SharedState {
     /// Aggregate network byte counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 
-    /// Optional override for the HTTP/HTTPS body returned on egress deny.
-    /// Unset uses [`DEFAULT_HTTP_DENY_MESSAGE`].
-    http_deny_message: OnceLock<String>,
+    /// HTTP denial settings installed before the network starts.
+    http: OnceLock<HttpConfig>,
 }
 
 /// Aggregate network byte counters shared with the runtime metrics sampler.
@@ -132,7 +132,7 @@ impl SharedState {
             gateway_ipv6: OnceLock::new(),
             nat64_prefixes: OnceLock::new(),
             metrics: NetworkMetrics::default(),
-            http_deny_message: OnceLock::new(),
+            http: OnceLock::new(),
         }
     }
 
@@ -157,20 +157,22 @@ impl SharedState {
         self.gateway_ipv6.get().copied()
     }
 
-    /// Override the HTTP/HTTPS body returned when egress is denied.
-    ///
-    /// `{host}` is replaced with the blocked hostname. The first call
-    /// wins; later calls are ignored.
-    pub fn set_http_deny_message(&self, message: impl Into<String>) {
-        let _ = self.http_deny_message.set(message.into());
+    /// Install HTTP denial settings. The first call wins.
+    pub fn set_http_config(&self, config: HttpConfig) {
+        let _ = self.http.set(config);
+    }
+
+    /// Whether readable denial responses were explicitly enabled.
+    pub fn http_deny_response_enabled(&self) -> bool {
+        self.http.get().is_some_and(|http| http.deny_response)
     }
 
     /// Render the HTTP/HTTPS deny body for `host`.
     pub fn http_deny_body(&self, host: &str) -> String {
         let template = self
-            .http_deny_message
+            .http
             .get()
-            .map(String::as_str)
+            .and_then(|http| http.deny_message.as_deref())
             .unwrap_or(DEFAULT_HTTP_DENY_MESSAGE);
         http_deny::render_http_deny_message(template, host)
     }

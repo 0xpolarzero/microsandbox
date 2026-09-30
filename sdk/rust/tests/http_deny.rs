@@ -34,7 +34,7 @@ fn dns_only_policy() -> NetworkPolicy {
     policy
 }
 
-async fn spawn(name: &str, tls: bool, message: Option<&str>) -> Sandbox {
+async fn spawn(name: &str, tls: bool, enabled: bool, message: Option<&str>) -> Sandbox {
     let message = message.map(str::to_owned);
     Sandbox::builder(name)
         .image(CURL_IMAGE)
@@ -43,7 +43,9 @@ async fn spawn(name: &str, tls: bool, message: Option<&str>) -> Sandbox {
         .user("0")
         .replace()
         .network(move |mut n| {
-            n = n.policy(dns_only_policy());
+            n = n
+                .policy(dns_only_policy())
+                .http(|h| h.deny_response(enabled));
             if tls {
                 n = n.tls(|t| t.enabled(true));
             }
@@ -82,11 +84,30 @@ async fn probe(sb: &Sandbox, url: &str) -> (String, String) {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
+/// With the default settings, neither plaintext nor intercepted TLS returns HTTP.
+#[msb_test]
+async fn denied_requests_fail_without_opt_in() {
+    let name = "http-deny-default";
+    let sb = spawn(name, true, false, Some("must not enable responses")).await;
+    for scheme in ["http", "https"] {
+        let (code, body) = probe(&sb, &format!("{scheme}://{DENIED_HOST}/")).await;
+        assert_eq!(
+            code, "000",
+            "disabled response returned HTTP: {code} ({body})"
+        );
+        assert!(
+            !body.contains("must not enable responses"),
+            "disabled response returned the custom body: {body}"
+        );
+    }
+    teardown(sb, name).await;
+}
+
 /// Plain HTTP to a denied name answers 403 with the default agent note.
 #[msb_test]
 async fn denied_plain_http_gets_403_with_agent_note() {
     let name = "http-deny-plain";
-    let sb = spawn(name, false, None).await;
+    let sb = spawn(name, false, true, None).await;
 
     let (code, body) = probe(&sb, &format!("http://{DENIED_HOST}/")).await;
     assert_eq!(
@@ -111,7 +132,7 @@ async fn denied_plain_http_gets_403_with_agent_note() {
 #[msb_test]
 async fn denied_https_gets_403_inside_intercepted_tls() {
     let name = "http-deny-tls";
-    let sb = spawn(name, true, None).await;
+    let sb = spawn(name, true, true, None).await;
 
     let (code, body) = probe(&sb, &format!("https://{DENIED_HOST}/")).await;
     assert_eq!(
@@ -138,6 +159,7 @@ async fn custom_http_deny_message_is_rendered() {
     let sb = spawn(
         name,
         true,
+        true,
         Some("blocked {host}: call the AllowHost tool to request access"),
     )
     .await;
@@ -160,7 +182,7 @@ async fn custom_http_deny_message_is_rendered() {
 #[msb_test]
 async fn denied_https_without_interception_still_fails_closed() {
     let name = "http-deny-tls-off";
-    let sb = spawn(name, false, None).await;
+    let sb = spawn(name, false, true, None).await;
 
     let (code, body) = probe(&sb, &format!("https://{DENIED_HOST}/")).await;
     assert_ne!(code, "403", "no HTTP answer expected without interception");

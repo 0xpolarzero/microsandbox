@@ -71,6 +71,8 @@ source ports impose additional constraints.
 
 For NAT64, Microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
 
+Custom NAT64 prefixes are supported only for local sandboxes. Cloud creation rejects non-default or empty prefix lists because the cloud API cannot carry this setting.
+
 <CodeGroup>
 ```typescript TypeScript
 await using sb = await Sandbox.builder("shared-worker")
@@ -355,7 +357,9 @@ The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-
 
 ## What a denied HTTP request sees
 
-When a domain rule denies a connection, the gateway never dials upstream. For HTTP/1.0 and HTTP/1.1, either in plaintext or over HTTPS on an intercepted port (see [TLS interception](/networking/tls)), the gateway answers the guest with `403 Forbidden` and a plain-text body instead of a bare connection reset. The default body is written for an agent running inside the sandbox:
+Denied connections fail without an HTTP response by default. Set `http.deny_response` to `true` (`denyResponse(true)` in TypeScript) to return a readable `403 Forbidden` instead. This applies to HTTP/1.0 and HTTP/1.1 in plaintext or over HTTPS on an intercepted port (see [TLS interception](/networking/tls)). The gateway never dials upstream.
+
+When enabled without a custom message, the response body is:
 
 ```text
 This host is not allowed by the sandbox network policy config.
@@ -363,9 +367,11 @@ This host is not allowed by the sandbox network policy config.
 Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
 ```
 
-Custom messages require a local runtime that supports HTTP denial responses. The SDK rejects this option on older runtimes and on cloud. Leaving it unset does not require the new capability.
+Enabling denial responses requires a supporting local runtime. The SDK rejects `deny_response: true` on older runtimes and on cloud. With it disabled, existing workflows need no new capability.
 
-Configure HTTP’s `deny_message` (`denyMessage` in TypeScript) to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
+An HTTP `403` is a response, not a connection error. Check the status in your client, or use `curl --fail` when relying on its exit code.
+
+Setting a message alone does not enable responses. Configure HTTP’s `deny_message` (`denyMessage` in TypeScript) to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -374,7 +380,7 @@ await using sb = await Sandbox.builder("agent")
     .network((n) => n
         .policy(policy)
         .tls((t) => t)
-        .http((h) => h.denyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
     .create();
 ```
 
@@ -384,7 +390,7 @@ let sb = Sandbox::builder("agent")
     .network(|n| n
         .policy(policy)
         .tls(|t| t.enabled(true))
-        .http(|h| h.deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
     .create()
     .await?;
 ```
@@ -398,7 +404,7 @@ sb = await Sandbox.create(
     network=Network(
         policy=policy,
         tls=TlsConfig(),
-        http=HttpConfig(deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."),
+        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."),
     ),
 )
 ```
@@ -409,7 +415,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
     m.WithNetwork(&m.NetworkConfig{
         Rules:           rules,
         TLS:             &m.TLSConfig{},
-        HTTP: &m.HTTPConfig{DenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."},
+        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."},
     }),
 )
 ```
@@ -419,7 +425,7 @@ sb = Microsandbox::Sandbox.create(
   "agent",
   image: "python",
   network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
-  http: { deny_message: "{host} is blocked. Ask the user to allow it." }
+  http: { deny_response: true, deny_message: "{host} is blocked. Ask the user to allow it." }
 )
 ```
 
@@ -428,6 +434,7 @@ network:
   policy: none
   allow: [github.com]
   http:
+    deny_response: true
     deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
 ```
 </CodeGroup>

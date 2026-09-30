@@ -1026,6 +1026,7 @@ export interface NapiDnsConfig {
 }
 
 export interface NapiHttpBuilder {
+  denyResponse(enabled: boolean): this;
   denyMessage(message: string): this;
 }
 

@@ -22,7 +22,14 @@ require_relative "microsandbox/errors"
 
 module Microsandbox
   class HttpBuilder
-    attr_reader :message
+    attr_reader :message, :response
+
+    def deny_response(value)
+      raise TypeError, "deny_response must be true or false" unless value == true || value == false
+
+      @response = value
+      self
+    end
 
     def deny_message(value)
       raise TypeError, "deny_message must be a String" unless value.is_a?(String)
@@ -36,7 +43,7 @@ module Microsandbox
     def http
       settings = HttpBuilder.new
       yield settings
-      http!(settings.message)
+      http!(settings.response, settings.message)
       self
     end
 

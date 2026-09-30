@@ -54,16 +54,16 @@ Builder terminal with the same reuse, creation-option, concurrency, and replace-
 #### <span className="msb-recv">builder.</span><span className="msb-hn">http()</span>
 
 ```ruby
-builder.http { |h| h.deny_message(message) } # => SandboxBuilder
+builder.http { |h| h.deny_response(true).deny_message(message) } # => SandboxBuilder
 ```
 
-Set the response body for denied HTTP requests on a local runtime that supports HTTP denial responses. `{host}` expands to the blocked hostname. Cloud rejects this option. See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees) for which requests receive a response.
+Denial responses are disabled by default. Call `h.deny_response(true)` to enable readable `403` responses. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it. See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees) for which requests receive a response.
 
 <Accordion title="Example">
 ```ruby
 builder = Microsandbox::Sandbox.builder("agent")
   .image("python")
-  .http { |h| h.deny_message("{host} is blocked. Ask the user to allow it.") }
+  .http { |h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.") }
 ```
 
 The same option is available when creating a sandbox:
@@ -73,7 +73,7 @@ Microsandbox::Sandbox.create(
   "agent",
   image: "python",
   network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
-  http: { deny_message: "{host} is blocked. Ask the user to allow it." }
+  http: { deny_response: true, deny_message: "{host} is blocked. Ask the user to allow it." }
 )
 ```
 </Accordion>

@@ -1536,13 +1536,12 @@ fn apply_network(
     }
 
     // Body returned to HTTP/HTTPS clients when egress is denied.
-    if let Some(message) = net
-        .http
-        .as_ref()
-        .and_then(|http| http.deny_message.as_ref())
-    {
-        let message = message.clone();
-        builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+    if let Some(http) = net.http.as_ref() {
+        builder = builder.network(|n| n.http(|h| h.deny_response(http.deny_response)));
+        if let Some(message) = http.deny_message.as_ref() {
+            let message = message.clone();
+            builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
     }
 
     // Sandbox-wide secret violation action.

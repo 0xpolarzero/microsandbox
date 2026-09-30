@@ -423,7 +423,8 @@ pub fn smoltcp_poll_loop(
                                 );
                             // Platform denies and explicit deny rules stay a
                             // reset; only "not on the allow list" is answered.
-                            answer_deny = platform_allows
+                            answer_deny = shared.http_deny_response_enabled()
+                                && platform_allows
                                 && !tenant_allows
                                 && tcp_deny::answers_denied_http(dst.port(), tls_state.as_deref())
                                 && network_policy.egress_denied_by_default(

@@ -3726,7 +3726,7 @@ async fn install_staged_cache(
             MicrosandboxError::Custom(format!("invalid snapshot image digest: {e}"))
         })?;
     let staged_cache = microsandbox_image::GlobalCache::new_async(cache_stage).await?;
-    let _real_cache = microsandbox_image::GlobalCache::new_async(cache_dir).await?;
+    let real_cache = microsandbox_image::GlobalCache::new_async(cache_dir).await?;
     let metadata = staged_cache
         .read_image_metadata_async(&image_ref)
         .await?
@@ -3738,7 +3738,7 @@ async fn install_staged_cache(
         })?;
     validate_cached_metadata(manifest, &metadata)?;
 
-    let expected_files = expected_cache_files(
+    let mut expected_files = expected_cache_files(
         &staged_cache,
         &image_ref,
         &metadata,
@@ -3746,11 +3746,18 @@ async fn install_staged_cache(
         manifest.root_disk.clone(),
     )?;
     ensure_only_expected_cache_files(cache_stage, &expected_files)?;
+    // The staged VMDK lists the exporter's extent paths; regenerate it for this cache instead.
+    let rebuild_vmdk = expected_files.remove(&staged_cache.vmdk_path(&pinned_digest));
     ensure_cache_targets_compatible(&expected_files, cache_stage, cache_dir).await?;
 
     let metadata_path = staged_cache.image_metadata_path(&image_ref);
     for source in expected_files.iter().filter(|path| **path != metadata_path) {
         install_cache_file(source, cache_stage, cache_dir).await?;
+    }
+    if rebuild_vmdk {
+        microsandbox_image::Registry::new(microsandbox_image::Platform::host_linux(), real_cache)?
+            .materialize_cached_layers(&image_ref, &metadata, false)
+            .await?;
     }
     install_cache_file(&metadata_path, cache_stage, cache_dir).await?;
 

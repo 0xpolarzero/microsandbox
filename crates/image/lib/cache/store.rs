@@ -7,6 +7,7 @@ use oci_client::Reference;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 
+use super::lock;
 use crate::{
     config::ImageConfig,
     digest::Digest,
@@ -305,6 +306,46 @@ impl GlobalCache {
     /// Check if a VMDK descriptor exists for a given manifest digest.
     pub fn is_vmdk_materialized(&self, manifest_digest: &Digest) -> bool {
         self.vmdk_path(manifest_digest).exists()
+    }
+
+    /// Rewrite the VMDK descriptor for a manifest digest so its extents are
+    /// this cache's fsmeta and layer EROFS files.
+    ///
+    /// Descriptors reference extents by absolute path, so one copied from
+    /// another cache must be regenerated rather than reused.
+    pub fn rewrite_vmdk(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+    ) -> ImageResult<()> {
+        let fsmeta = self.fsmeta_erofs_path(manifest_digest);
+        let layers: Vec<PathBuf> = layer_diff_ids
+            .iter()
+            .map(|diff_id| self.layer_erofs_path(diff_id))
+            .collect();
+        let mut extents: Vec<&Path> = vec![&fsmeta];
+        extents.extend(layers.iter().map(PathBuf::as_path));
+
+        // Serialize with image materialization, which writes the VMDK under this lock.
+        let lock = lock::open_lock_file(&self.fsmeta_erofs_lock_path(manifest_digest))?;
+        lock::lock_exclusive(&lock)?;
+        let _unlock = scopeguard::guard(lock, |file| {
+            let _ = lock::flock_unlock(&file);
+        });
+
+        let vmdk = self.vmdk_path(manifest_digest);
+        let work_dir = self.work_dir(manifest_digest);
+        std::fs::create_dir_all(&work_dir).map_err(|source| ImageError::Cache {
+            path: work_dir.clone(),
+            source,
+        })?;
+        let _work_guard = scopeguard::guard((), |_| {
+            let _ = std::fs::remove_dir_all(&work_dir);
+        });
+        let temp = work_dir.join("rootfs.vmdk");
+        crate::stitch::write_vmdk_descriptor(&temp, &extents)
+            .and_then(|()| std::fs::rename(&temp, &vmdk))
+            .map_err(|source| ImageError::Cache { path: vmdk, source })
     }
 
     // ── Flat ext4 artifact paths (manifest ref → content blob) ───────

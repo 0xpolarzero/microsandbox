@@ -8,7 +8,8 @@ use microsandbox::sandbox::{
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
 use super::common::{
-    display_restore_warnings, guest_clock_parser, parse_restore_volume, parse_vsock_route,
+    display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
+    parse_vsock_route,
 };
 use crate::ui;
 
@@ -42,6 +43,9 @@ pub struct RestoreArgs {
     /// Destination resource bindings.
     #[command(flatten)]
     pub resources: RestoreResourceArgs,
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
     /// Destination controls applied before the restored workload can run.
     #[command(flatten)]
     pub controls: RestoreControlArgs,
@@ -221,6 +225,10 @@ pub async fn run(
         builder = builder.snapshot_base(base);
     }
     builder = args.resources.apply_restore(builder)?;
+    for spec in &args.mount_disk {
+        let (guest, mount) = parse_explicit_disk_mount(spec)?;
+        builder = builder.volume(guest, |_| mount);
+    }
     builder = args.controls.apply(builder)?;
     let (mut progress, task) = builder.restore_with_progress()?;
     let mut display = if args.quiet {
@@ -335,6 +343,32 @@ mod tests {
             explicit.args.resources.external_mount_policy.as_deref(),
             Some("strict")
         );
+    }
+
+    #[test]
+    fn restore_attaches_mount_disk_like_create() {
+        let spec = "/images/seed.img:/data2:ro,fstype=ext4";
+        let cli =
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(cli.args.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.mount_disk[0]).unwrap();
+        assert_eq!(guest, "/data2");
+        match mount.build().unwrap() {
+            microsandbox::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
     }
 
     #[test]

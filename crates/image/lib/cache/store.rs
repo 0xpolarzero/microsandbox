@@ -13,6 +13,7 @@ use crate::{
     digest::Digest,
     erofs::ErofsReader,
     error::{ImageError, ImageResult},
+    progress::{PullProgress, PullProgressSender},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -46,6 +47,15 @@ const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Whether descriptor generation replaces an existing cached file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VmdkWriteMode {
+    /// Repair paths even when a descriptor already exists.
+    ReplaceExisting,
+    /// Recheck under the lock and preserve an existing descriptor.
+    KeepExisting,
+}
 
 /// On-disk global cache for OCI layers and EROFS images.
 ///
@@ -318,6 +328,22 @@ impl GlobalCache {
         manifest_digest: &Digest,
         layer_diff_ids: &[Digest],
     ) -> ImageResult<()> {
+        self.write_vmdk(
+            manifest_digest,
+            layer_diff_ids,
+            VmdkWriteMode::ReplaceExisting,
+            None,
+        )
+    }
+
+    /// Write a descriptor under the image materialization lock.
+    pub(crate) fn write_vmdk(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+        mode: VmdkWriteMode,
+        progress: Option<&PullProgressSender>,
+    ) -> ImageResult<()> {
         let fsmeta = self.fsmeta_erofs_path(manifest_digest);
         let layers: Vec<PathBuf> = layer_diff_ids
             .iter()
@@ -334,6 +360,20 @@ impl GlobalCache {
         });
 
         let vmdk = self.vmdk_path(manifest_digest);
+        if mode == VmdkWriteMode::KeepExisting {
+            // A concurrent pull may have regenerated the descriptor while we waited.
+            if vmdk.exists() {
+                return Ok(());
+            }
+            if !is_valid_erofs_artifact(&fsmeta) {
+                return Err(ImageError::Materialize {
+                    digest: manifest_digest.to_string(),
+                    message: "fsmeta vanished while waiting for VMDK regen lock".into(),
+                    source: None,
+                });
+            }
+        }
+
         let work_dir = self.work_dir(manifest_digest);
         std::fs::create_dir_all(&work_dir).map_err(|source| ImageError::Cache {
             path: work_dir.clone(),
@@ -342,10 +382,29 @@ impl GlobalCache {
         let _work_guard = scopeguard::guard((), |_| {
             let _ = std::fs::remove_dir_all(&work_dir);
         });
+        if let Some(progress) = progress {
+            progress.send(PullProgress::StitchWritingVmdk);
+        }
+
         let temp = work_dir.join("rootfs.vmdk");
-        crate::stitch::write_vmdk_descriptor(&temp, &extents)
-            .and_then(|()| std::fs::rename(&temp, &vmdk))
-            .map_err(|source| ImageError::Cache { path: vmdk, source })
+        crate::stitch::write_vmdk_descriptor(&temp, &extents).map_err(|source| match mode {
+            VmdkWriteMode::ReplaceExisting => ImageError::Cache {
+                path: vmdk.clone(),
+                source,
+            },
+            VmdkWriteMode::KeepExisting => ImageError::Materialize {
+                digest: manifest_digest.to_string(),
+                message: format!("VMDK write failed: {source}"),
+                source: None,
+            },
+        })?;
+        std::fs::rename(&temp, &vmdk).map_err(|source| ImageError::Cache { path: vmdk, source })?;
+
+        if let Some(progress) = progress {
+            progress.send(PullProgress::StitchComplete);
+        }
+
+        Ok(())
     }
 
     // ── Flat ext4 artifact paths (manifest ref → content blob) ───────

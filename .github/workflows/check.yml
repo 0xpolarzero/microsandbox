@@ -828,6 +828,7 @@ jobs:
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
           cargo +stable check -p microsandbox-network --no-default-features
+          cargo +stable check -p microsandbox-types --features utoipa
 
       - name: Docs
         env:

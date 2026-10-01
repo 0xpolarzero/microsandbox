@@ -535,3 +535,48 @@ fn capturing_sparse_builder_paths_does_not_fill_other_layer_fields() {
     };
     assert_eq!(guest, expected);
 }
+
+#[cfg(unix)]
+#[test]
+fn bind_mount_through_symlink_fails_early_unless_it_opts_out() {
+    // The runtime refuses symlinks in a bind mount root unless the mount opts out,
+    // so creation must report that instead of persisting a sandbox that cannot boot.
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let file = base.join("file.txt");
+    std::fs::write(&file, "x").unwrap();
+    let file_link = base.join("file-link.txt");
+    std::os::unix::fs::symlink(&file, &file_link).unwrap();
+
+    let resolve = |host: PathBuf, follow: bool| {
+        let mut mount = bind(host, "/data");
+        if let VolumeMount::Bind {
+            follow_root_symlinks,
+            ..
+        } = &mut mount
+        {
+            *follow_root_symlinks = follow;
+        }
+        let mut config = SandboxConfig::default();
+        config.spec.mounts = vec![mount];
+        resolve_host_paths(&mut config)
+    };
+
+    // The final component and an ancestor are both refused, naming the symlink.
+    for host in [link.clone(), link.join("child")] {
+        let message = resolve(host.clone(), false).unwrap_err().to_string();
+        assert!(message.contains(&link.display().to_string()), "{message}");
+        assert!(message.contains("symlink"), "{message}");
+        assert!(message.contains("follow-root-symlinks"), "{message}");
+    }
+    resolve(link.clone(), true).unwrap();
+    resolve(real.clone(), false).unwrap();
+    // Missing paths are left to the runtime.
+    resolve(base.join("missing").join("child"), false).unwrap();
+    // File binds are isolated by a synthetic root, so symlinked files stay allowed.
+    resolve(file_link, false).unwrap();
+}

@@ -51,7 +51,57 @@ pub(crate) fn resolve_host_paths(config: &mut SandboxConfig) -> MicrosandboxResu
             })?;
         }
         Ok(())
-    })
+    })?;
+    check_bind_roots_do_not_follow_symlinks(config)
+}
+
+/// Report a symlinked bind mount root now instead of when the sandbox boots.
+///
+/// The runtime opens a bind mount root without following symlinks in any
+/// component, including the last, unless `follow_root_symlinks` is set. Mirror
+/// that check here so creation fails with an actionable error before the sandbox
+/// is persisted. File binds are canonicalized by `SingleFileFs` and are not
+/// subject to it. The runtime enforces the policy itself; this only explains it.
+#[cfg(unix)]
+fn check_bind_roots_do_not_follow_symlinks(config: &SandboxConfig) -> MicrosandboxResult<()> {
+    for mount in &config.spec.mounts {
+        let VolumeMount::Bind {
+            host,
+            follow_root_symlinks: false,
+            ..
+        } = mount
+        else {
+            continue;
+        };
+        if host.is_file() {
+            continue;
+        }
+        let mut current = PathBuf::new();
+        for component in host.components() {
+            current.push(component);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let resolved = std::fs::canonicalize(host)
+                        .map(|path| format!("use the resolved path {} or ", path.display()))
+                        .unwrap_or_default();
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "bind mount host path {} goes through symlink {}; {resolved}add follow-root-symlinks",
+                        host.display(),
+                        current.display()
+                    )));
+                }
+                Ok(_) => {}
+                // A missing or unreadable component is still reported at start.
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_bind_roots_do_not_follow_symlinks(_config: &SandboxConfig) -> MicrosandboxResult<()> {
+    Ok(())
 }
 
 /// Capture explicit builder inputs without turning omitted settings into overrides.

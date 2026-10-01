@@ -4007,6 +4007,7 @@ name = "microsandbox-go"
 version = "0.7.5"
 dependencies = [
  "base64 0.23.1",
+ "cap-std",
  "cbindgen",
  "chrono",
  "ipnetwork",

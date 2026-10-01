@@ -281,6 +281,7 @@ impl LocalBackend {
                 config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
             }
             crate::sandbox::apply_snapshot_guest_clock(&mut config, &materialized.manifest)?;
+            crate::sandbox::require_recorded_mounts(&config, &materialized.manifest)?;
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());

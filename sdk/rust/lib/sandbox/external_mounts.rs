@@ -20,6 +20,34 @@ use crate::{
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Refuse a disk restore that would silently drop mounts its snapshot recorded.
+///
+/// A disk snapshot carries only guest paths, never host paths, so each one needs a destination
+/// mapping unless the restore opted out with `allow_missing_resources`.
+pub(crate) fn require_recorded_mounts(
+    config: &SandboxConfig,
+    manifest: &crate::snapshot::Manifest,
+) -> MicrosandboxResult<()> {
+    if !config.restore_resources.require_complete {
+        return Ok(());
+    }
+    // The backend canonicalizes mounts later; compare the same form (`/data/` is `/data`).
+    let mut mounts = config.spec.mounts.clone();
+    microsandbox_types::canonicalize_volume_mounts(&mut mounts)?;
+    let missing: BTreeSet<String> = manifest
+        .external_mounts()
+        .map_err(integrity)?
+        .into_iter()
+        .filter(|guest| mounts.iter().all(|mount| mount.guest() != guest))
+        .map(|guest| format!("mount {guest}"))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing_resources(missing))
+    }
+}
+
 /// Reconnect only user-selected bindings or an exact locally recorded source binding.
 pub(crate) async fn resolve_external_mounts(
     local: &LocalBackend,

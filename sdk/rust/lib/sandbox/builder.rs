@@ -2035,6 +2035,7 @@ pub(crate) fn prepare_local_snapshot_restore(
     config.spec.image = RootfsSource::oci(snap_ref);
     config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
     apply_snapshot_root_layout(config, &snap.manifest().root_disk)?;
+    crate::sandbox::require_recorded_mounts(config, snap.manifest())?;
 
     let file_state = match &snap.manifest().state {
         crate::snapshot::SnapshotState::File(state) => state,
@@ -3940,6 +3941,57 @@ mod tests {
             .into_config();
         super::apply_snapshot_guest_clock(&mut config, &sync).unwrap();
         assert_eq!(config.spec.runtime.guest_clock, Some(GuestClockPolicy::Off));
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn disk_restore_requires_a_destination_for_each_recorded_mount() {
+        let mut manifest = manifest_with_guest_clock(super::super::GuestClockPolicy::Sync);
+        manifest
+            .set_external_mounts(vec!["/data".into(), "/logs".into()])
+            .unwrap();
+        let config = |builder: SandboxBuilder, complete: bool| {
+            let mut config = builder.config.into_config();
+            config.restore_resources.require_complete = complete;
+            config
+        };
+
+        // Unbound: refused with the full-restore wording, naming every missing path.
+        let error = super::super::require_recorded_mounts(
+            &config(SandboxBuilder::new("restore"), true),
+            &manifest,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("restore requires destination bindings for: mount /data, mount /logs")
+        );
+
+        // A mapping for only one path still refuses for the other.
+        let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));
+        let error = super::super::require_recorded_mounts(&config(partial, true), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mount /logs") && !error.contains("mount /data"));
+
+        // Every path mapped, or the explicit opt-out (require_complete cleared): accepted.
+        let full = SandboxBuilder::new("restore")
+            .volume("/data/", |m| m.bind("/tmp/data"))
+            .volume("/logs", |m| m.named("logs"));
+        super::super::require_recorded_mounts(&config(full, true), &manifest).unwrap();
+        super::super::require_recorded_mounts(
+            &config(SandboxBuilder::new("restore"), false),
+            &manifest,
+        )
+        .unwrap();
+
+        // Snapshots without the extension (older or no external mounts) are unaffected.
+        let plain = manifest_with_guest_clock(super::super::GuestClockPolicy::Sync);
+        super::super::require_recorded_mounts(
+            &config(SandboxBuilder::new("restore"), true),
+            &plain,
+        )
+        .unwrap();
     }
 
     #[test]

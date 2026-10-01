@@ -1750,7 +1750,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     }
     if !matches!(
         current.status,
-        SandboxStatus::Stopped | SandboxStatus::Crashed
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
     ) {
         return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
             "cannot remove sandbox {name:?}: status is {:?}",
@@ -1794,7 +1794,7 @@ pub(super) async fn remove_local_persisted_sandbox(
     }
     if !matches!(
         current.status,
-        SandboxStatus::Stopped | SandboxStatus::Crashed
+        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed
     ) {
         return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
             "cannot remove sandbox {name:?}: status changed to {:?}",
@@ -2121,6 +2121,41 @@ mod tests {
             crate::MicrosandboxError::SandboxReplaced { .. }
         ));
         assert!(sandbox_dir.join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_removal_removes_a_sandbox_that_never_started() {
+        let temp = tempdir().unwrap();
+        let backend = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let pools = backend.db().await.unwrap();
+        let created = super::sandbox_entity::ActiveModel {
+            name: Set("never-started".to_string()),
+            config: Set("{}".to_string()),
+            status: Set(SandboxStatus::Created),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let sandbox_dir = backend.sandboxes_dir().join("never-started");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+
+        remove_local_persisted_sandbox(&backend, "never-started", created.id)
+            .await
+            .unwrap();
+
+        assert!(!sandbox_dir.exists());
+        assert!(matches!(
+            remove_local_persisted_sandbox(&backend, "never-started", created.id).await,
+            Err(crate::MicrosandboxError::SandboxNotFound(_))
+        ));
     }
 
     #[cfg(unix)]

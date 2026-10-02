@@ -119,6 +119,26 @@ func TestRestoreTCPAcceptQueueSizeReachesFFI(t *testing.T) {
 	}
 }
 
+func TestRestoreDiskVolumeReachesFFI(t *testing.T) {
+	config := RestoreConfig{Volumes: map[string]MountConfig{
+		"/data2": Mount.Disk("/images/seed.img", DiskOptions{Fstype: "ext4", Readonly: true}),
+	}}
+	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Volumes map[string]map[string]any `json:"volumes"`
+	}
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	disk := got.Volumes["/data2"]
+	if disk["disk"] != "/images/seed.img" || disk["fstype"] != "ext4" || disk["readonly"] != true {
+		t.Fatalf("disk volume lost: %s", encoded)
+	}
+}
+
 func TestRestoreRejectsDuplicateTCPAliasesBeforeFFI(t *testing.T) {
 	// Matching values are also ambiguous: reject both spellings instead of
 	// letting option order silently select which limit reaches the runtime.

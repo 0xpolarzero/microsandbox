@@ -43,6 +43,9 @@ pub struct RestoreArgs {
     /// Destination resource bindings.
     #[command(flatten)]
     pub resources: RestoreResourceArgs,
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
     /// Destination controls applied before the restored workload can run.
     #[command(flatten)]
     pub controls: RestoreControlArgs,
@@ -60,9 +63,6 @@ pub struct RestoreResourceArgs {
     /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
-    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
-    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
-    pub mount_disk: Vec<String>,
     /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
     #[cfg(feature = "net")]
     #[arg(short, long)]
@@ -200,6 +200,18 @@ impl RestoreControlArgs {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Attach each `--mount-disk` spec as a restore volume; the only path `run` uses.
+fn apply_mount_disks(
+    mut builder: RestoreBuilder,
+    specs: &[String],
+) -> anyhow::Result<RestoreBuilder> {
+    for spec in specs {
+        let (guest, mount) = parse_explicit_disk_mount(spec)?;
+        builder = builder.volume(guest, |_| mount);
+    }
+    Ok(builder)
+}
+
 /// Restore captured state; use exec separately to start a new command.
 pub async fn run(
     args: RestoreArgs,
@@ -225,6 +237,7 @@ pub async fn run(
         builder = builder.snapshot_base(base);
     }
     builder = args.resources.apply_restore(builder)?;
+    builder = apply_mount_disks(builder, &args.mount_disk)?;
     builder = args.controls.apply(builder)?;
     let (mut progress, task) = builder.restore_with_progress()?;
     let mut display = if args.quiet {
@@ -265,10 +278,6 @@ macro_rules! apply_resources {
                 }
                 for volume in &self.volume {
                     let (guest, mount) = parse_restore_volume(volume)?;
-                    builder = builder.volume(guest, |_| mount);
-                }
-                for spec in &self.mount_disk {
-                    let (guest, mount) = parse_explicit_disk_mount(spec)?;
                     builder = builder.volume(guest, |_| mount);
                 }
                 for route in &self.vsock {
@@ -351,8 +360,8 @@ mod tests {
         let cli =
             TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
                 .unwrap();
-        assert_eq!(cli.args.resources.mount_disk, [spec]);
-        let (guest, mount) = parse_explicit_disk_mount(&cli.args.resources.mount_disk[0]).unwrap();
+        assert_eq!(cli.args.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.mount_disk[0]).unwrap();
         assert_eq!(guest, "/data2");
         match mount.build().unwrap() {
             microsandbox::sandbox::VolumeMount::DiskImage {
@@ -371,26 +380,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn mount_disk_reaches_run_builder_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let cli = TestCli::try_parse_from([
+            "restore",
+            missing.to_str().unwrap(),
+            "--name",
+            "restore-disk-binding",
+            "--mount-disk",
+            "/images/seed.img:/:ro,fstype=ext4",
+        ])
+        .unwrap();
+        // A root guest path is rejected by mount validation before the snapshot is
+        // opened, so this fails only if `run` hands the disk to the restore builder.
+        let error = run(cli.args, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mount a volume at guest root /"),
+            "{error:#}"
+        );
+    }
+
     #[test]
-    fn mount_disk_is_applied_with_the_shared_resource_args() {
-        let parse = |spec| {
-            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
-                .unwrap()
-        };
-        let ok = parse("/images/seed.img:/data2:ro,fstype=ext4");
-        assert!(
-            ok.args
-                .resources
-                .apply_restore(Sandbox::restore("group:snap"))
-                .is_ok()
-        );
-        let bad = parse("/images/seed.img");
-        assert!(
-            bad.args
-                .resources
-                .apply_restore(Sandbox::restore("group:snap"))
-                .is_err()
-        );
+    fn mount_disk_specs_are_applied_to_the_restore_builder() {
+        // RestoreBuilder state is private to the SDK; its restore_builder tests prove that
+        // `volume(..., disk)` lands in the config. Here, prove `run`'s helper parses and applies.
+        let specs = ["/images/seed.img:/data2:ro,fstype=ext4".to_string()];
+        assert!(apply_mount_disks(Sandbox::restore("group:snap"), &specs).is_ok());
+        let bad = ["/images/seed.img".to_string()];
+        assert!(apply_mount_disks(Sandbox::restore("group:snap"), &bad).is_err());
     }
 
     #[test]

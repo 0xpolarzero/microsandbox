@@ -2041,7 +2041,7 @@ pub fn apply_explicit_disk_mount(
 
 /// Parse a `--mount-disk` spec into its guest path and configured mount.
 ///
-/// Shared by create and restore so both accept the same grammar.
+/// Shared by create, restore, and both fork forms.
 pub(crate) fn parse_explicit_disk_mount(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     let parsed = parse_cli_mount_spec(
         "mount-disk",

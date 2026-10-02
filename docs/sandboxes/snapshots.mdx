@@ -518,7 +518,7 @@ Existing callers can migrate gradually. Keep using the old name until you update
 
 `fork` is the live operation; the former `branch` SDK methods remain deprecated aliases.
 
-Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s memory writes stay private.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -553,6 +553,8 @@ msb fork worker --name experiment
 </CodeGroup>
 
 The source returns to its previous running or paused state. Each child needs a new name and cannot inherit published host ports. Host mounts follow the same [binding rules](#external-mounts).
+
+A fork cannot add a new block device, but it can rebind a captured disk to a host image consistent with the captured state: `--mount-disk` in the CLI, or a disk volume in the SDK. The image is attached directly to each child, without a private copy, so batch forks shouldn't share a writable image. Use separate fork calls with separate images for writable disks. To share one image in a batch, capture the disk read-only and keep the supplied binding read-only.
 
 <Accordion title="Create several children">
 

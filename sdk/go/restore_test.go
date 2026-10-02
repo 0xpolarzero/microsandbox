@@ -193,9 +193,10 @@ func TestRestoreRejectsNegativeLifetimes(t *testing.T) {
 }
 
 func TestForkDiskVolumeReachesFFI(t *testing.T) {
+	diskPath := filepath.Join(t.TempDir(), "seed.img")
 	var options ForkOptions
 	WithForkVolumes(map[string]MountConfig{
-		"/data": Mount.Disk("/images/seed.img", DiskOptions{Fstype: "ext4", Readonly: true}),
+		"/data": Mount.Disk(diskPath, DiskOptions{Fstype: "ext4", Readonly: true}),
 	})(&options)
 	volumes, err := ffiForkVolumes(options.Volumes)
 	if err != nil {
@@ -210,7 +211,7 @@ func TestForkDiskVolumeReachesFFI(t *testing.T) {
 		t.Fatal(err)
 	}
 	disk := got["/data"]
-	if disk["disk"] != "/images/seed.img" || disk["fstype"] != "ext4" || disk["readonly"] != true {
+	if disk["disk"] != diskPath || disk["fstype"] != "ext4" || disk["readonly"] != true {
 		t.Fatalf("disk volume lost: %s", encoded)
 	}
 	if volumes, err := ffiForkVolumes(nil); volumes != nil || err != nil {
@@ -227,11 +228,12 @@ func TestForkVolumesAnchorRelativeHostPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	absoluteDisk := filepath.Join(cwd, "abs", "seed.img")
 	volumes, err := ffiForkVolumes(map[string]MountConfig{
 		"/data":   Mount.Disk("images/seed.img", DiskOptions{}),
 		"/shared": Mount.Bind("shared", MountOptions{}),
 		"/cache":  Mount.Named("cache", MountOptions{}),
-		"/abs":    Mount.Disk("/abs/seed.img", DiskOptions{}),
+		"/abs":    Mount.Disk(absoluteDisk, DiskOptions{}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +247,61 @@ func TestForkVolumesAnchorRelativeHostPaths(t *testing.T) {
 	if got := volumes["/cache"].Named; got != "cache" {
 		t.Fatalf("named volume = %q, want cache", got)
 	}
-	if got := volumes["/abs"].Disk; got != "/abs/seed.img" {
-		t.Fatalf("absolute disk path = %q, want /abs/seed.img", got)
+	if got := volumes["/abs"].Disk; got != absoluteDisk {
+		t.Fatalf("absolute disk path = %q, want %q", got, absoluteDisk)
+	}
+}
+
+func TestForkVolumesPreserveSymlinkParentPaths(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("Windows resolves parent components lexically")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(target, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "seed.img"), []byte("through-link"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "seed.img"), []byte("wrong-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(target, "child"), link); err != nil {
+		t.Fatal(err)
+	}
+	relativeLink, err := filepath.Rel(cwd, link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hostPath := range []string{relativeLink + "/../seed.img", link + "/../seed.img"} {
+		volumes, err := ffiForkVolumes(map[string]MountConfig{
+			"/data":   Mount.Disk(hostPath, DiskOptions{}),
+			"/shared": Mount.Bind(hostPath, MountOptions{}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := hostPath
+		if !filepath.IsAbs(want) {
+			want = strings.TrimSuffix(cwd, "/") + "/" + want
+		}
+		for _, got := range []string{volumes["/data"].Disk, volumes["/shared"].Bind} {
+			if got != want {
+				t.Fatalf("host path = %q, want %q", got, want)
+			}
+			data, err := os.ReadFile(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "through-link" {
+				t.Fatalf("host path %q opened %q, want through-link", got, data)
+			}
+		}
 	}
 }

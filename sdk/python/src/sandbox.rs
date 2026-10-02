@@ -1458,6 +1458,8 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
+        // Mount changes are not exposed by this binding yet.
+        ..Default::default()
     }
 }
 

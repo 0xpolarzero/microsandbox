@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use microsandbox_types::{
-    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
+    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction, VolumeMount,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
@@ -55,6 +55,9 @@ const ROOT_DISK_FIELD: &str = "root_disk_size";
 const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
 const WORKDIR_FIELD: &str = "workdir";
+const MOUNT_FIELD: &str = "mount";
+const LIVE_MOUNT_UPDATE_UNAVAILABLE: &str =
+    "mounts are fixed when the VM boots; adding or removing one needs a restart";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -192,6 +195,32 @@ impl SandboxModificationBuilder {
         self
     }
 
+    /// Add a volume mount, or replace the mount already at its guest path.
+    ///
+    /// Mounts are fixed when the VM boots, so a running sandbox needs
+    /// [`next_start`](Self::next_start) or [`restart`](Self::restart).
+    /// Sandbox-owned volumes cannot be added here: they are created with the
+    /// sandbox.
+    ///
+    /// ```ignore
+    /// sandbox.modify()
+    ///     .mount(MountBuilder::new("/opt/apps").bind("/host/apps").readonly().build()?)
+    ///     .next_start()
+    ///     .apply()
+    ///     .await?;
+    /// ```
+    pub fn mount(mut self, mount: VolumeMount) -> Self {
+        self.patch.mounts.push(mount);
+        self
+    }
+
+    /// Remove the mount at a guest path. Sandbox-owned volumes cannot be
+    /// removed, since that would delete their data.
+    pub fn remove_mount(mut self, guest: impl Into<String>) -> Self {
+        self.patch.mounts_remove.push(guest.into());
+        self
+    }
+
     /// Persist the requested changes for the next start.
     pub fn next_start(mut self) -> Self {
         self.policy = ModificationPolicy::NextStart;
@@ -249,7 +278,10 @@ impl SandboxModificationBuilder {
     }
 
     /// Compute a modification plan without applying anything.
-    pub async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan> {
+    pub async fn dry_run(mut self) -> MicrosandboxResult<SandboxModificationPlan> {
+        if self.backend.as_local().is_some() {
+            resolve_patch_mount_paths(&mut self.patch)?;
+        }
         let handle = self
             .backend
             .sandboxes()
@@ -289,7 +321,10 @@ impl SandboxModificationBuilder {
     /// `tls` change and, like every other restart-backed change, needs
     /// `restart` or `next_start` on a running sandbox. Existing secrets that
     /// opt out of TLS identity continue to support live plain-HTTP updates.
-    pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
+    pub async fn apply(mut self) -> MicrosandboxResult<SandboxModificationPlan> {
+        if self.backend.as_local().is_some() {
+            resolve_patch_mount_paths(&mut self.patch)?;
+        }
         let handle = self
             .backend
             .sandboxes()
@@ -321,6 +356,7 @@ impl SandboxModificationBuilder {
             let mut prospective = config.clone();
             apply_patch_to_config(&mut prospective, &self.patch);
             apply_secret_patch_to_config(&mut prospective, &self.patch)?;
+            apply_mount_patch_to_config(&mut prospective, &self.patch)?;
             serde_json::to_string(&prospective)?;
         }
         let restart_required = plan_requires_restart(&plan) && running_status(status);
@@ -453,6 +489,7 @@ impl SandboxModificationBuilder {
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             apply_secret_patch_to_config(&mut config, &self.patch)?;
+            apply_mount_patch_to_config(&mut config, &self.patch)?;
             persist_config(&self.backend, &handle, &config).await?;
         }
         if restart_required {
@@ -595,6 +632,7 @@ fn build_plan(
         }
     }
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
+    push_mount_changes(status, config, &patch, policy, &mut changes, &mut conflicts);
     push_secret_changes(
         status,
         config,
@@ -2199,6 +2237,199 @@ fn push_spec_changes(
             push_future_exec_warning(WORKDIR_FIELD, status, policy, warnings);
         }
     }
+}
+
+/// One planned mount change, with the guest path as its identity.
+struct MountDelta {
+    kind: ChangeKind,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+/// Apply the mount half of a patch to a mount list.
+///
+/// Returns the resulting list, validated and ordered exactly like create, plus
+/// one delta per effective change. The planner and the apply step both use this,
+/// so the plan never drifts from what is persisted. Replacing a guest path
+/// that already has a mount is allowed; an identical mount is a no-op.
+fn resolve_mount_patch(
+    current: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> Result<(Vec<VolumeMount>, Vec<MountDelta>), String> {
+    let mut mounts = current.to_vec();
+    let mut deltas = Vec::new();
+    let mut added = Vec::new();
+
+    let canonical = |guest: &str| {
+        microsandbox_types::canonical_guest_mount_path(guest).map_err(|error| error.to_string())
+    };
+    let removed = patch
+        .mounts_remove
+        .iter()
+        .map(|guest| canonical(guest))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for requested in &patch.mounts {
+        let mut mount = requested.clone();
+        let guest = canonical(mount.guest())?;
+        if let VolumeMount::Named { create, .. } = &mut mount {
+            // Modify never provisions named volumes; the volume must already exist.
+            *create = None;
+        }
+        if matches!(mount, VolumeMount::Owned { .. }) {
+            return Err(format!(
+                "{guest} cannot be an owned volume: owned volumes are created with the sandbox"
+            ));
+        }
+        if added.contains(&guest) {
+            return Err(format!("mount {guest} is set more than once"));
+        }
+        if removed.contains(&guest) {
+            return Err(format!(
+                "mount {guest} is both set and removed in the same modification"
+            ));
+        }
+        *guest_of(&mut mount) = guest.clone();
+        added.push(guest.clone());
+        match mounts.iter().position(|existing| existing.guest() == guest) {
+            Some(index) => {
+                if matches!(mounts[index], VolumeMount::Owned { .. }) {
+                    return Err(format!(
+                        "{guest} is an owned volume and cannot be replaced: that would orphan its data"
+                    ));
+                }
+                if mount_json(&mounts[index]) == mount_json(&mount) {
+                    continue;
+                }
+                deltas.push(MountDelta {
+                    kind: ChangeKind::Updated,
+                    before: Some(format_mount(&mounts[index])),
+                    after: Some(format_mount(&mount)),
+                });
+                mounts[index] = mount;
+            }
+            None => {
+                deltas.push(MountDelta {
+                    kind: ChangeKind::Added,
+                    before: None,
+                    after: Some(format_mount(&mount)),
+                });
+                mounts.push(mount);
+            }
+        }
+    }
+
+    for guest in removed {
+        let Some(index) = mounts.iter().position(|mount| mount.guest() == guest) else {
+            return Err(format!("no mount at {guest} to remove"));
+        };
+        if matches!(mounts[index], VolumeMount::Owned { .. }) {
+            return Err(format!(
+                "{guest} is an owned volume and cannot be removed: that would delete its data"
+            ));
+        }
+        deltas.push(MountDelta {
+            kind: ChangeKind::Removed,
+            before: Some(format_mount(&mounts[index])),
+            after: None,
+        });
+        mounts.remove(index);
+    }
+
+    if !deltas.is_empty() {
+        super::validate_volume_mounts(&mut mounts).map_err(|error| error.to_string())?;
+    }
+    Ok((mounts, deltas))
+}
+
+fn guest_of(mount: &mut VolumeMount) -> &mut String {
+    match mount {
+        VolumeMount::Bind { guest, .. }
+        | VolumeMount::Owned { guest, .. }
+        | VolumeMount::Named { guest, .. }
+        | VolumeMount::Tmpfs { guest, .. }
+        | VolumeMount::DiskImage { guest, .. } => guest,
+    }
+}
+
+fn mount_json(mount: &VolumeMount) -> Option<serde_json::Value> {
+    serde_json::to_value(mount).ok()
+}
+
+fn format_mount(mount: &VolumeMount) -> String {
+    let (source, options) = match mount {
+        VolumeMount::Bind { host, options, .. } => (format!("bind {}", host.display()), options),
+        VolumeMount::Named { name, options, .. } => (format!("named {name}"), options),
+        VolumeMount::DiskImage { host, options, .. } => {
+            (format!("disk {}", host.display()), options)
+        }
+        VolumeMount::Tmpfs { options, .. } => ("tmpfs".to_string(), options),
+        VolumeMount::Owned { options, .. } => ("owned".to_string(), options),
+    };
+    format!(
+        "{}: {source} ({})",
+        mount.guest(),
+        if options.readonly { "ro" } else { "rw" }
+    )
+}
+
+fn push_mount_changes(
+    status: SandboxStatus,
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+    changes: &mut Vec<PlannedChange>,
+    conflicts: &mut Vec<ModificationConflict>,
+) {
+    if patch.mounts.is_empty() && patch.mounts_remove.is_empty() {
+        return;
+    }
+    match resolve_mount_patch(&config.spec.mounts, patch) {
+        Ok((_, deltas)) => {
+            for delta in deltas {
+                changes.push(spec_change(
+                    MOUNT_FIELD,
+                    delta.kind,
+                    delta.before,
+                    delta.after,
+                    status,
+                    policy,
+                    LIVE_MOUNT_UPDATE_UNAVAILABLE,
+                ));
+            }
+        }
+        Err(message) => conflicts.push(ModificationConflict {
+            field: MOUNT_FIELD.to_string(),
+            message,
+        }),
+    }
+}
+
+/// Make relative host paths in new mounts absolute against the caller's working
+/// directory, once, before the patch is planned or persisted.
+fn resolve_patch_mount_paths(patch: &mut SandboxModificationPatch) -> MicrosandboxResult<()> {
+    if patch.mounts.is_empty() {
+        return Ok(());
+    }
+    let mut config = SandboxConfig::default();
+    config.spec.mounts = std::mem::take(&mut patch.mounts);
+    let result = crate::backend::local::host_paths::resolve_host_paths(&mut config);
+    patch.mounts = config.spec.mounts;
+    result
+}
+
+/// Persist the mount half of a patch into the desired config.
+fn apply_mount_patch_to_config(
+    config: &mut SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<()> {
+    if patch.mounts.is_empty() && patch.mounts_remove.is_empty() {
+        return Ok(());
+    }
+    let (mounts, _) = resolve_mount_patch(&config.spec.mounts, patch)
+        .map_err(crate::MicrosandboxError::InvalidConfig)?;
+    config.spec.mounts = mounts;
+    Ok(())
 }
 
 fn push_spec_conflicts(
@@ -4349,6 +4580,272 @@ mod tests {
         );
         assert!(!current.spec.labels.contains_key("team"));
         assert_eq!(current.spec.runtime.workdir.as_deref(), Some("/srv"));
+    }
+
+    fn bind_mount(guest: &str, host: &str, readonly: bool) -> VolumeMount {
+        let mut mount = crate::sandbox::MountBuilder::new(guest).bind(host);
+        if readonly {
+            mount = mount.readonly();
+        }
+        mount.build().unwrap()
+    }
+
+    fn owned_mount(guest: &str) -> VolumeMount {
+        crate::sandbox::MountBuilder::new(guest)
+            .owned()
+            .build()
+            .unwrap()
+    }
+
+    fn config_with_mounts(mounts: Vec<VolumeMount>) -> SandboxConfig {
+        let mut config = config(2, 1024);
+        config.spec.mounts = mounts;
+        config
+    }
+
+    fn mount_plan(
+        status: SandboxStatus,
+        policy: ModificationPolicy,
+        config: &SandboxConfig,
+        patch: SandboxModificationPatch,
+    ) -> SandboxModificationPlan {
+        build_plan(
+            "api".to_string(),
+            status,
+            config,
+            None,
+            LiveControl::default(),
+            patch,
+            policy,
+        )
+    }
+
+    fn mount_guests(config: &SandboxConfig) -> Vec<&str> {
+        config.spec.mounts.iter().map(VolumeMount::guest).collect()
+    }
+
+    #[test]
+    fn mount_changes_follow_the_restart_required_policy_matrix() {
+        let config = config_with_mounts(vec![bind_mount("/opt/old", "/host/old", false)]);
+        let patch = SandboxModificationPatch {
+            mounts: vec![bind_mount("/opt/apps", "/host/apps", true)],
+            mounts_remove: vec!["/opt/old".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        for (status, policy, expected) in [
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::NoRestart,
+                ModificationDisposition::RequiresRestart,
+            ),
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::Restart,
+                ModificationDisposition::RequiresRestart,
+            ),
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::NextStart,
+                ModificationDisposition::NextStart,
+            ),
+            (
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                ModificationDisposition::NextStart,
+            ),
+        ] {
+            let plan = mount_plan(status, policy, &config, patch.clone());
+            assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+            assert_eq!(plan.changes.len(), 2);
+            for change in &plan.changes {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                assert_eq!(change.field, "mount");
+                assert_eq!(change.disposition, expected);
+            }
+            // A running sandbox under the default policy rejects the whole patch.
+            assert_eq!(
+                validate_apply_supported(&plan).is_err(),
+                expected == ModificationDisposition::RequiresRestart
+                    && policy == ModificationPolicy::NoRestart
+            );
+        }
+    }
+
+    #[test]
+    fn applying_mount_patch_adds_replaces_and_removes_by_guest_path() {
+        let mut config = config_with_mounts(vec![
+            bind_mount("/opt/keep", "/host/keep", false),
+            bind_mount("/opt/replace", "/host/before", false),
+            bind_mount("/opt/drop", "/host/drop", false),
+        ]);
+        let patch = SandboxModificationPatch {
+            mounts: vec![
+                bind_mount("/opt/replace/", "/host/after", true),
+                bind_mount("/opt/new", "/host/new", false),
+            ],
+            mounts_remove: vec!["/opt/drop".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = mount_plan(
+            SandboxStatus::Stopped,
+            ModificationPolicy::NoRestart,
+            &config,
+            patch.clone(),
+        );
+        let kinds: Vec<_> = plan
+            .changes
+            .iter()
+            .map(|change| match change {
+                PlannedChange::Config(change) => change.change,
+                PlannedChange::Secret(_) => panic!("unexpected secret change"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![ChangeKind::Updated, ChangeKind::Added, ChangeKind::Removed]
+        );
+
+        apply_mount_patch_to_config(&mut config, &patch).unwrap();
+
+        assert_eq!(
+            mount_guests(&config),
+            vec!["/opt/keep", "/opt/new", "/opt/replace"]
+        );
+        let replaced = config
+            .spec
+            .mounts
+            .iter()
+            .find(|mount| mount.guest() == "/opt/replace")
+            .unwrap();
+        assert!(matches!(
+            replaced,
+            VolumeMount::Bind { host, options, .. }
+                if host == std::path::Path::new("/host/after") && options.readonly
+        ));
+    }
+
+    #[test]
+    fn owned_volumes_cannot_be_added_replaced_or_removed() {
+        let config = config_with_mounts(vec![owned_mount("/data")]);
+        let cases = [
+            (
+                SandboxModificationPatch {
+                    mounts: vec![owned_mount("/scratch")],
+                    ..SandboxModificationPatch::default()
+                },
+                "owned volumes are created with the sandbox",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![bind_mount("/data", "/host/data", false)],
+                    ..SandboxModificationPatch::default()
+                },
+                "cannot be replaced",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts_remove: vec!["/data".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "cannot be removed",
+            ),
+        ];
+
+        for (patch, expected) in cases {
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                &config,
+                patch.clone(),
+            );
+            assert!(plan.changes.is_empty());
+            assert_eq!(plan.conflicts.len(), 1);
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "{}",
+                plan.conflicts[0].message
+            );
+            let mut applied = config.clone();
+            assert!(apply_mount_patch_to_config(&mut applied, &patch).is_err());
+            assert_eq!(mount_guests(&applied), vec!["/data"]);
+        }
+    }
+
+    #[test]
+    fn mount_patch_is_validated_like_create() {
+        let config = config_with_mounts(vec![bind_mount("/opt/apps", "/host/apps", true)]);
+        let cases = [
+            (
+                SandboxModificationPatch {
+                    mounts: vec![VolumeMount::Tmpfs {
+                        guest: "opt/relative".to_string(),
+                        size_mib: None,
+                        options: Default::default(),
+                    }],
+                    ..SandboxModificationPatch::default()
+                },
+                "must be absolute",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![
+                        bind_mount("/opt/new", "/host/a", false),
+                        bind_mount("/opt/new/", "/host/b", false),
+                    ],
+                    ..SandboxModificationPatch::default()
+                },
+                "set more than once",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![bind_mount("/opt/new", "/host/a", false)],
+                    mounts_remove: vec!["/opt/new".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "both set and removed",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts_remove: vec!["/opt/nothing".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "no mount at /opt/nothing",
+            ),
+        ];
+
+        for (patch, expected) in cases {
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                &config,
+                patch,
+            );
+            assert_eq!(plan.conflicts.len(), 1, "{expected}");
+            assert_eq!(plan.conflicts[0].field, "mount");
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "{}",
+                plan.conflicts[0].message
+            );
+            assert!(plan.changes.is_empty());
+            assert!(validate_apply_supported(&plan).is_err());
+        }
+
+        // An identical mount is a no-op, not a change.
+        let noop = mount_plan(
+            SandboxStatus::Running,
+            ModificationPolicy::NoRestart,
+            &config,
+            SandboxModificationPatch {
+                mounts: vec![bind_mount("/opt/apps", "/host/apps", true)],
+                ..SandboxModificationPatch::default()
+            },
+        );
+        assert!(noop.changes.is_empty() && noop.conflicts.is_empty());
     }
 
     #[test]

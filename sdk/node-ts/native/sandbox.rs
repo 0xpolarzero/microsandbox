@@ -1179,6 +1179,8 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        // Mount changes are not exposed by this binding yet.
+        ..Default::default()
     };
 
     let builder = builder.with_patch(patch);

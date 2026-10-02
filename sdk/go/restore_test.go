@@ -3,6 +3,8 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -217,5 +219,33 @@ func TestForkDiskVolumeReachesFFI(t *testing.T) {
 	owned := map[string]MountConfig{"/data": Mount.Owned(OwnedVolumeOptions{Kind: VolumeKindDisk})}
 	if _, err := ffiForkVolumes(owned); err == nil {
 		t.Fatal("invalid owned mount was accepted")
+	}
+}
+
+func TestForkVolumesAnchorRelativeHostPaths(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumes, err := ffiForkVolumes(map[string]MountConfig{
+		"/data":   Mount.Disk("images/seed.img", DiskOptions{}),
+		"/shared": Mount.Bind("shared", MountOptions{}),
+		"/cache":  Mount.Named("cache", MountOptions{}),
+		"/abs":    Mount.Disk("/abs/seed.img", DiskOptions{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := volumes["/data"].Disk, filepath.Join(cwd, "images/seed.img"); got != want {
+		t.Fatalf("disk path = %q, want %q", got, want)
+	}
+	if got, want := volumes["/shared"].Bind, filepath.Join(cwd, "shared"); got != want {
+		t.Fatalf("bind path = %q, want %q", got, want)
+	}
+	if got := volumes["/cache"].Named; got != "cache" {
+		t.Fatalf("named volume = %q, want cache", got)
+	}
+	if got := volumes["/abs"].Disk; got != "/abs/seed.img" {
+		t.Fatalf("absolute disk path = %q, want /abs/seed.img", got)
 	}
 }

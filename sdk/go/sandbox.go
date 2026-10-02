@@ -36,10 +36,16 @@ const (
 	GuestFlushSkip GuestFlush = "skip"
 )
 
-// ForkOptions controls optional integrity and guest writeback for a local fork.
+// ForkOptions controls optional integrity, guest writeback, and captured-disk
+// rebinding for a local fork.
 type ForkOptions struct {
 	RecordIntegrity bool
 	GuestFlush      GuestFlush
+	// Volumes rebinds a captured disk at its guest path to a host image holding
+	// the captured state; a fork cannot add a new block device. Each child
+	// attaches the image directly, without a private copy, so batch forks
+	// should not share a writable image.
+	Volumes map[string]MountConfig
 }
 
 // ForkOutcome contains either a running child or its startup error.
@@ -80,6 +86,11 @@ func WithBranchGuestFlush(policy GuestFlush) ForkOption { return WithForkGuestFl
 // WithForkIntegrity records disk content hashes; RAM backing remains unhashed.
 func WithForkIntegrity() ForkOption {
 	return func(options *ForkOptions) { options.RecordIntegrity = true }
+}
+
+// WithForkVolumes rebinds captured disks to host images; see ForkOptions.Volumes.
+func WithForkVolumes(volumes map[string]MountConfig) ForkOption {
+	return func(options *ForkOptions) { options.Volumes = volumes }
 }
 
 // WithForkGuestFlush selects guest writeback before capturing a live fork.
@@ -1020,7 +1031,11 @@ func (h *SandboxHandle) ForkMany(ctx context.Context, names []string, opts ...Fo
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, volumes, string(options.GuestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 
@@ -1044,7 +1059,11 @@ func (h *SandboxHandle) Fork(ctx context.Context, name string, opts ...ForkOptio
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, volumes, string(options.GuestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1229,7 +1248,11 @@ func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*S
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, volumes, string(options.GuestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1248,8 +1271,23 @@ func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOpti
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, volumes, string(options.GuestFlush))
 	return wrapBranchOutcomes(rows, err)
+}
+
+// ffiForkVolumes validates and encodes fork volumes like restore volumes.
+func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, error) {
+	if len(volumes) == 0 {
+		return nil, nil
+	}
+	if err := validateOwnedMounts(volumes); err != nil {
+		return nil, err
+	}
+	return buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes, nil
 }
 
 func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {

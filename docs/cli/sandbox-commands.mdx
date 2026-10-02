@@ -390,7 +390,7 @@ msb fork devbox --names worker-{1..10} # Bash/Zsh expand the names
 
 Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
-Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
+Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore), except `--mount-disk`.
 
 Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 

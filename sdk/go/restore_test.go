@@ -189,3 +189,33 @@ func TestRestoreRejectsNegativeLifetimes(t *testing.T) {
 		}
 	}
 }
+
+func TestForkDiskVolumeReachesFFI(t *testing.T) {
+	var options ForkOptions
+	WithForkVolumes(map[string]MountConfig{
+		"/data": Mount.Disk("/images/seed.img", DiskOptions{Fstype: "ext4", Readonly: true}),
+	})(&options)
+	volumes, err := ffiForkVolumes(options.Volumes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(volumes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	disk := got["/data"]
+	if disk["disk"] != "/images/seed.img" || disk["fstype"] != "ext4" || disk["readonly"] != true {
+		t.Fatalf("disk volume lost: %s", encoded)
+	}
+	if volumes, err := ffiForkVolumes(nil); volumes != nil || err != nil {
+		t.Fatalf("no volumes encoded as %v, %v", volumes, err)
+	}
+	owned := map[string]MountConfig{"/data": Mount.Owned(OwnedVolumeOptions{Kind: VolumeKindDisk})}
+	if _, err := ffiForkVolumes(owned); err == nil {
+		t.Fatal("invalid owned mount was accepted")
+	}
+}

@@ -198,6 +198,8 @@ pub(crate) struct ArchiveChildMaterialization {
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
     pub(crate) disk_mounts: Vec<microsandbox_types::VolumeMount>,
+    /// Guest paths of external binds a disk-only restore of a checkpoint drops unless remapped.
+    pub(crate) dropped_bind_paths: Vec<String>,
 }
 
 /// Updates a member transport hash as the archive writer consumes the source.
@@ -1126,6 +1128,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: None,
             upper_layers: Vec::new(),
             disk_mounts: Vec::new(),
+            dropped_bind_paths: Vec::new(),
         });
     };
     let member = inventory
@@ -1195,6 +1198,9 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
                 disk_mounts: materialized.disk_mounts,
+                dropped_bind_paths: crate::sandbox::external_bind_guest_paths(
+                    &checkpoint.resources,
+                )?,
             });
         }
         let child_closure = child_stage.join(".checkpoint-restore");
@@ -1220,6 +1226,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
             disk_mounts: materialized.disk_mounts,
+            dropped_bind_paths: Vec::new(),
         });
     }
     let SnapshotState::File(file) = &manifest.state else {
@@ -1285,6 +1292,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
         disk_mounts: materialized.disk_mounts,
+        dropped_bind_paths: Vec::new(),
     })
 }
 

@@ -2059,6 +2059,13 @@ pub(crate) fn prepare_local_snapshot_restore(
                 ));
             }
             crate::snapshot::validate_checkpoint_owned_inventory(snap.manifest(), &opened)?;
+            if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
+                // A disk-only restore drops the captured external binds; require them up front.
+                crate::sandbox::require_guest_mounts(
+                    config,
+                    crate::sandbox::external_bind_guest_paths(&opened.resources)?,
+                )?;
+            }
             if config.snapshot_restore_mode == SnapshotRestoreMode::Full {
                 if opened.architecture != std::env::consts::ARCH {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
@@ -3956,7 +3963,7 @@ mod tests {
             config
         };
 
-        // Unbound: refused with the full-restore wording, naming every missing path.
+        // Unbound: refused, naming every missing path.
         let error = super::super::require_recorded_mounts(
             &config(SandboxBuilder::new("restore"), true),
             &manifest,
@@ -3966,6 +3973,7 @@ mod tests {
         assert!(
             error.contains("restore requires destination bindings for: mount /data, mount /logs")
         );
+        assert!(!error.contains("select captured disks"));
 
         // A mapping for only one path still refuses for the other.
         let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));

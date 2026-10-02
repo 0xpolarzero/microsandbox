@@ -65,6 +65,8 @@ CBOR envelope = { v: generation, t: wire message name, p: encoded payload }
 
 Compatibility-sensitive elements include the header size, byte order, maximum frame size, ID routing, flag bits, CBOR envelope keys, message wire names, message introduction generations, payload field names and meanings, and terminal/session/shutdown semantics. The relay routes on IDs and flags without decoding CBOR, so changing the header cannot be hidden behind payload negotiation.
 
+Disk snapshots may carry the advisory `microsandbox.external-mounts` descriptor extension, which lists guest paths only (never host paths) of mounts whose backing is not captured. It is never in `requires`, so older readers ignore it and restore as before; snapshots without it are unchanged.
+
 Evolution rules:
 
 - Keep the outer frame shape stable.

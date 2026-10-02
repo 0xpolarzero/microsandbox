@@ -28,15 +28,47 @@ pub(crate) fn require_recorded_mounts(
     config: &SandboxConfig,
     manifest: &crate::snapshot::Manifest,
 ) -> MicrosandboxResult<()> {
+    require_guest_mounts(config, manifest.external_mounts().map_err(integrity)?)
+}
+
+/// Guest paths of the external bind mounts a checkpoint captured (owned directories are restored
+/// from the snapshot and need no mapping).
+pub(crate) fn external_bind_guest_paths(
+    resources: &[microsandbox_image::checkpoint::ResourceDescriptor],
+) -> MicrosandboxResult<Vec<String>> {
+    resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .binding
+                .get("role")
+                .is_some_and(|role| role == "external_bind")
+        })
+        .map(|resource| {
+            let mount: microsandbox_protocol::bootstrap::BootstrapDirMount = serde_json::from_str(
+                resource
+                    .binding
+                    .get("guest_mount")
+                    .ok_or_else(|| integrity("external resource is missing its guest mount"))?,
+            )
+            .map_err(integrity)?;
+            Ok(mount.guest_path)
+        })
+        .collect()
+}
+
+/// Require a destination mapping for each guest path unless the restore opted out.
+pub(crate) fn require_guest_mounts(
+    config: &SandboxConfig,
+    guest_paths: Vec<String>,
+) -> MicrosandboxResult<()> {
     if !config.restore_resources.require_complete {
         return Ok(());
     }
     // The backend canonicalizes mounts later; compare the same form (`/data/` is `/data`).
     let mut mounts = config.spec.mounts.clone();
     microsandbox_types::canonicalize_volume_mounts(&mut mounts)?;
-    let missing: BTreeSet<String> = manifest
-        .external_mounts()
-        .map_err(integrity)?
+    let missing: BTreeSet<String> = guest_paths
         .into_iter()
         .filter(|guest| mounts.iter().all(|mount| mount.guest() != guest))
         .map(|guest| format!("mount {guest}"))
@@ -44,7 +76,7 @@ pub(crate) fn require_recorded_mounts(
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(missing_resources(missing))
+        Err(missing_disk_mounts(missing))
     }
 }
 
@@ -419,6 +451,14 @@ fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
     ))
 }
 
+/// A disk restore maps host paths itself; captured disks cannot satisfy this check.
+fn missing_disk_mounts(missing: BTreeSet<String>) -> MicrosandboxError {
+    MicrosandboxError::InvalidConfig(format!(
+        "restore requires destination bindings for: {}; provide --volume SOURCE:GUEST mappings or explicitly use --allow-missing-resources",
+        missing.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
 async fn backing_exists(path: &std::path::Path) -> MicrosandboxResult<bool> {
     match tokio::fs::metadata(path).await {
         Ok(_) => Ok(true),
@@ -448,6 +488,50 @@ mod tests {
         assert!(error.contains("disk /data, filesystem /work"));
         assert!(error.contains("--allow-missing-resources"));
         assert!(!error.contains("select relaxed"));
+    }
+
+    fn resource(role: &str, guest: &str) -> microsandbox_image::checkpoint::ResourceDescriptor {
+        let mount = serde_json::json!({ "tag": "t", "guest_path": guest });
+        microsandbox_image::checkpoint::ResourceDescriptor {
+            id: format!("fs:{guest}"),
+            kind: "filesystem".into(),
+            treatment: microsandbox_image::checkpoint::ResourceTreatment::Reconnect,
+            binding: std::collections::BTreeMap::from([
+                ("role".into(), role.into()),
+                ("guest_mount".into(), mount.to_string()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn disk_restore_of_a_checkpoint_requires_its_external_binds() {
+        let resources = [
+            resource("external_bind", "/data"),
+            resource("owned_directory", "/own"),
+        ];
+        let paths = external_bind_guest_paths(&resources).unwrap();
+        assert_eq!(paths, ["/data"]);
+
+        let config = |builder: crate::sandbox::SandboxBuilder, complete: bool| {
+            let mut config = builder.config.into_config();
+            config.restore_resources.require_complete = complete;
+            config
+        };
+        let unmapped = config(crate::sandbox::SandboxBuilder::new("restore"), true);
+        let error = require_guest_mounts(&unmapped, paths.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("restore requires destination bindings for: mount /data;"));
+        assert!(error.contains("--volume SOURCE:GUEST"));
+        assert!(!error.contains("select captured disks"));
+
+        let mapped = config(
+            crate::sandbox::SandboxBuilder::new("restore").volume("/data/", |m| m.bind("/tmp/d")),
+            true,
+        );
+        require_guest_mounts(&mapped, paths.clone()).unwrap();
+        let opted_out = config(crate::sandbox::SandboxBuilder::new("restore"), false);
+        require_guest_mounts(&opted_out, paths).unwrap();
     }
 
     async fn requested_mount() -> VolumeMount {

@@ -136,8 +136,8 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
                 await connected.detach()
             if sandbox is not None:
                 await sandbox.detach()
-        with suppress(SandboxNotFoundError):
-            await Sandbox.remove(name)
+            with suppress(SandboxNotFoundError):
+                await Sandbox.remove(name)
 
 
 @pytest.mark.asyncio

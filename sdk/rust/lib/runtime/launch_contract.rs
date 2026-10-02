@@ -459,6 +459,14 @@ impl LaunchContract {
     }
 }
 
+impl LaunchContract {
+    /// Runtimes from v0.6.7 refuse a bind root that goes through a symlink unless
+    /// the mount sets `follow_root_symlinks`; earlier ones always follow it.
+    pub(crate) fn refuses_symlinked_bind_roots(&self) -> bool {
+        self.machine || self.patch >= 7
+    }
+}
+
 impl FileIdentity {
     fn capture(file: &File) -> std::io::Result<Self> {
         let metadata = file.metadata()?;
@@ -756,6 +764,16 @@ fn upgrade_required(feature: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinked_bind_roots_are_only_refused_from_the_enforcing_runtime() {
+        let contract = |patch, machine| LaunchContract { patch, machine };
+        assert!(!contract(0, false).refuses_symlinked_bind_roots());
+        assert!(!contract(6, false).refuses_symlinked_bind_roots());
+        assert!(contract(7, false).refuses_symlinked_bind_roots());
+        assert!(contract(18, false).refuses_symlinked_bind_roots());
+        assert!(contract(0, true).refuses_symlinked_bind_roots());
+    }
 
     #[cfg(unix)]
     #[test]

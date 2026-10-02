@@ -419,6 +419,21 @@ impl LocalBackend {
         // Resource inheritance may add legacy relative bindings after initial admission.
         // This is a new child: pin its launch inputs without rewriting the saved source.
         super::super::host_paths::resolve_host_paths(&mut config)?;
+        // After external-mount admission, so a relaxed restore can still mark a vanished
+        // mount unavailable, and before the sandbox row is inserted. Earlier work (image
+        // pull, archive decode, child materialization, a `--replace` deletion) has already
+        // happened, as with the runtime's own boot-time failure. Older runtimes follow
+        // root symlinks, so only a runtime that refuses them is checked.
+        let enforce = match crate::setup::resolve_runtime(self.config()) {
+            Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
+                .await?
+                .refuses_symlinked_bind_roots(),
+            Err(crate::MicrosandboxError::RuntimeNotInstalled(_)) => true,
+            Err(error) => return Err(error),
+        };
+        if enforce {
+            super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
+        }
 
         // Archive descriptors are resolved here, after the builder's initial validation.
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.

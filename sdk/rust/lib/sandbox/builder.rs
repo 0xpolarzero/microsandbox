@@ -3982,6 +3982,15 @@ mod tests {
             .to_string();
         assert!(error.contains("mount /logs") && !error.contains("mount /data"));
 
+        // A tmpfs at a recorded path is not a host binding: still refused.
+        let tmpfs = SandboxBuilder::new("restore")
+            .volume("/data", |m| m.tmpfs())
+            .volume("/logs", |m| m.named("logs"));
+        let error = super::super::require_recorded_mounts(&config(tmpfs, true), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mount /data") && !error.contains("mount /logs"));
+
         // Every path mapped, or the explicit opt-out (require_complete cleared): accepted.
         let full = SandboxBuilder::new("restore")
             .volume("/data/", |m| m.bind("/tmp/data"))

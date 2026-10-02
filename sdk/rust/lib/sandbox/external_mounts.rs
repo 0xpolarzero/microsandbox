@@ -70,7 +70,18 @@ pub(crate) fn require_guest_mounts(
     microsandbox_types::canonicalize_volume_mounts(&mut mounts)?;
     let missing: BTreeSet<String> = guest_paths
         .into_iter()
-        .filter(|guest| mounts.iter().all(|mount| mount.guest() != guest))
+        .filter(|guest| {
+            // Only host-backed kinds satisfy a recorded path; tmpfs or owned mounts would
+            // restart with empty state in place of the captured host binding.
+            !mounts.iter().any(|mount| {
+                matches!(
+                    mount,
+                    microsandbox_types::VolumeMount::Bind { .. }
+                        | microsandbox_types::VolumeMount::Named { .. }
+                        | microsandbox_types::VolumeMount::DiskImage { .. }
+                ) && mount.guest() == guest
+            })
+        })
         .map(|guest| format!("mount {guest}"))
         .collect();
     if missing.is_empty() {

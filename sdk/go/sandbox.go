@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -1292,12 +1293,25 @@ func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, e
 	specs := buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes
 	// Fork is always local. Resolve host paths now so a later chdir cannot change
 	// which file the native fork opens.
+	var cwd string
 	for guestPath, spec := range specs {
 		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
-			if *hostPath == "" {
+			if *hostPath == "" || filepath.IsAbs(*hostPath) {
 				continue
 			}
-			abs, err := filepath.Abs(*hostPath)
+			var abs string
+			var err error
+			if filepath.Separator == '\\' {
+				abs, err = filepath.Abs(*hostPath)
+			} else {
+				if cwd == "" {
+					cwd, err = os.Getwd()
+				}
+				if err == nil {
+					// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
+					abs = strings.TrimSuffix(cwd, "/") + "/" + *hostPath
+				}
+			}
 			if err != nil {
 				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
 			}

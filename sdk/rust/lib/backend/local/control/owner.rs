@@ -34,7 +34,6 @@ struct RuntimeOwner {
     key: RuntimeKey,
     process: ProcessIdentity,
     endpoints: Vec<PathBuf>,
-    /// A restore reads the restored targets before the sandbox is published as `Running`.
     allow_starting: bool,
 }
 

@@ -428,10 +428,9 @@ func buildModifyMount(guest string, mount MountConfig) (modifyMount, error) {
 	return entry, nil
 }
 
-// inapplicableMountOptions names the supplied options that do not apply to the
-// mount's kind, as the core builder rejects them at create. Named volume
-// provisioning settings (NamedMode, NamedKind, SizeMiB, QuotaMiB) are the
-// deliberate exception: modify ignores them rather than provisioning.
+// inapplicableMountOptions lists options unsupported by the mount kind.
+// Named-volume provisioning settings (NamedMode, NamedKind, SizeMiB,
+// QuotaMiB) are ignored because modify does not provision volumes.
 func inapplicableMountOptions(mount MountConfig) []string {
 	kind := mount.Kind()
 	virtiofs := kind == MountKindBind || kind == MountKindNamed

@@ -804,7 +804,7 @@ mod tests {
         mount.stat_virtualization = Some("strict".into());
         assert!(mount.into_core().is_err());
 
-        // Named volume provisioning metadata is deliberately ignored.
+        // Named volume provisioning metadata is ignored.
         let mut named = built(RustMountBuilder::new("/data").named("shared"));
         named.size_mib = Some(64);
         named.quota_mib = Some(64);

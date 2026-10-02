@@ -274,7 +274,7 @@ func TestParseModificationPlan(t *testing.T) {
 func TestModifyRequestJSONMounts(t *testing.T) {
 	out := marshalModifyRequest(t, ModifyOptions{
 		Mounts: map[string]MountConfig{
-			// Deliberately unsorted; entries must serialize in guest order.
+			// Entries serialize in guest-path order.
 			"/tmp/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 64, Noexec: true}),
 			"/data":        Mount.Named("shared", MountOptions{Readonly: true}),
 			"/code": Mount.Bind("/srv/code", MountOptions{

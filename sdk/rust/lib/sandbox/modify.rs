@@ -5194,7 +5194,7 @@ mod tests {
             started.elapsed()
         );
 
-        // The refused apply released its volume lock.
+        // A refused apply must release its volume lock.
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             crate::volume::remove_local(backend.clone(), "data"),

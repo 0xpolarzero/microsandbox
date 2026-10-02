@@ -34,6 +34,8 @@ struct RuntimeOwner {
     key: RuntimeKey,
     process: ProcessIdentity,
     endpoints: Vec<PathBuf>,
+    /// A restore reads the restored targets before the sandbox is published as `Running`.
+    allow_starting: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -48,6 +50,24 @@ impl LocalBackend {
     pub(crate) async fn control_session(
         &self,
         name: &str,
+    ) -> MicrosandboxResult<Option<ControlSession>> {
+        self.control_session_with(name, false).await
+    }
+
+    /// Like [`Self::control_session`], for the creator of a sandbox whose readiness is not yet
+    /// published (its catalog status is still `Starting`). Checkpoint restore reads the restored
+    /// CPU and memory targets there; the process and run identity checks are unchanged.
+    pub(crate) async fn control_session_while_starting(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<Option<ControlSession>> {
+        self.control_session_with(name, true).await
+    }
+
+    async fn control_session_with(
+        &self,
+        name: &str,
+        allow_starting: bool,
     ) -> MicrosandboxResult<Option<ControlSession>> {
         let pools = self.db().await?;
         let database = self
@@ -69,7 +89,7 @@ impl LocalBackend {
             .one(pools.read())
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.into()))?;
-        let run = current_run(pools.read(), model.id)
+        let run = current_run(pools.read(), model.id, allow_starting)
             .await
             .map_err(|error| MicrosandboxError::ControlClient(Arc::new(error)))?;
         let pid = run.pid.ok_or_else(|| {
@@ -89,6 +109,7 @@ impl LocalBackend {
             key,
             process,
             endpoints,
+            allow_starting,
         });
         owner
             .verify_session(Instant::now() + std::time::Duration::from_secs(10))
@@ -188,9 +209,12 @@ impl VerifiedControlConnector for RuntimeOwner {
             }
             self.database.verify()?;
             self.process.verify()?;
-            let run = tokio::time::timeout_at(deadline, current_run(&self.db, self.key.sandbox_id))
-                .await
-                .map_err(|_| ClientError::new(ErrorKind::Timeout))??;
+            let run = tokio::time::timeout_at(
+                deadline,
+                current_run(&self.db, self.key.sandbox_id, self.allow_starting),
+            )
+            .await
+            .map_err(|_| ClientError::new(ErrorKind::Timeout))??;
             if run.id != self.key.run_id || run.pid != Some(self.key.pid) {
                 return Err(ControlClientError::RuntimeChanged);
             }
@@ -205,15 +229,23 @@ impl VerifiedControlConnector for RuntimeOwner {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-async fn current_run(db: &DbReadConnection, sandbox_id: i32) -> ControlClientResult<run::Model> {
+async fn current_run(
+    db: &DbReadConnection,
+    sandbox_id: i32,
+    allow_starting: bool,
+) -> ControlClientResult<run::Model> {
+    let mut statuses = vec![
+        sandbox::SandboxStatus::Running,
+        sandbox::SandboxStatus::Draining,
+    ];
+    if allow_starting {
+        statuses.push(sandbox::SandboxStatus::Starting);
+    }
     run::Entity::find()
         .inner_join(sandbox::Entity)
         .filter(run::Column::SandboxId.eq(sandbox_id))
         .filter(run::Column::Status.eq(run::RunStatus::Running))
-        .filter(sandbox::Column::Status.is_in([
-            sandbox::SandboxStatus::Running,
-            sandbox::SandboxStatus::Draining,
-        ]))
+        .filter(sandbox::Column::Status.is_in(statuses))
         .order_by_desc(run::Column::Id)
         .one(db)
         .await

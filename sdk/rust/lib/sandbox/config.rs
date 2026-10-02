@@ -2687,6 +2687,7 @@ mod layering_tests {
             "registries": {"ca_certs": "/host/ca.pem"},
             "ssh": {"inactivity_timeout_secs": 30},
             "metrics": {"capacity": 128},
+            "snapshots": {"max_filesystem_state_mib": 64},
             "sandbox_defaults": {"oci": {"root_disk": {"kind": "tmpfs", "size_mib": 4096}}}
         }))
         .unwrap();
@@ -2735,6 +2736,7 @@ mod layering_tests {
             registries: _,
             ssh: _,
             metrics: _,
+            snapshots: _,
         } = crate::config::GlobalConfig::default();
         // Every global field is mapped here, excluded below, or handled separately.
         // Each mapped field has its own null semantics; omission always stays sparse.
@@ -2859,6 +2861,7 @@ mod layering_tests {
             json!({"registries":{"ca_certs":"/host/ca.pem"}}),
             json!({"ssh":{"inactivity_timeout_secs":30}}),
             json!({"metrics":{"capacity":128}}),
+            json!({"snapshots":{"max_filesystem_state_mib":64}}),
             json!({"sandbox_defaults":{"oci":{"root_disk":{"kind":"tmpfs"},"upper_size_mib":null}}}),
         ] {
             let global: GlobalConfigPatch = serde_json::from_value(input.clone()).unwrap();

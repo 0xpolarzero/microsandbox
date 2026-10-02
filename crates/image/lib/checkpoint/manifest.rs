@@ -18,8 +18,9 @@ const MAX_COMPONENTS: usize = 4096;
 const MAX_MEMORY_EXTENTS: usize = 4 * 1024 * 1024;
 const VIRTIO_TYPE_FS: u32 = 26;
 const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
-// A virtio-fs state records every guest inode the device retains, so it outgrows other devices.
-const MAX_FS_DEVICE_STATE_BYTES: u64 = 8 * 1024 * 1024;
+const FS_DEVICE_STATE_HEADER_BYTES: u64 = 22;
+#[cfg(test)]
+pub(crate) const DEFAULT_FS_STATE_LIMIT: usize = 4 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -195,13 +196,31 @@ pub struct CheckpointManifest {
 //--------------------------------------------------------------------------------------------------
 
 impl DeviceStateRef {
+    /// Whether this is a virtio-fs device.
+    pub fn is_virtio_fs(&self) -> bool {
+        self.device_type == VIRTIO_TYPE_FS
+    }
+
     /// Largest encoded state object admitted for this device type.
-    pub fn max_state_bytes(&self) -> u64 {
-        match self.device_type {
-            VIRTIO_TYPE_FS => MAX_FS_DEVICE_STATE_BYTES,
-            _ => MAX_DEVICE_STATE_BYTES,
+    ///
+    /// A virtio-fs state records every guest inode the device retains, so it carries the
+    /// filesystem backend state of up to `fs_state_limit` bytes on top of the common device state.
+    pub fn max_state_bytes(&self, fs_state_limit: usize) -> u64 {
+        if self.is_virtio_fs() {
+            FS_DEVICE_STATE_HEADER_BYTES + fs_state_limit as u64 + MAX_DEVICE_STATE_BYTES
+        } else {
+            MAX_DEVICE_STATE_BYTES
         }
     }
+}
+
+/// Error for a virtio-fs state object larger than the configured budget.
+pub fn fs_state_budget_error(fs_state_limit: usize) -> String {
+    format!(
+        "virtio-fs state exceeds the {} MiB budget; raise snapshots.max_filesystem_state_mib \
+         (a running sandbox keeps the budget it started with)",
+        fs_state_limit / (1024 * 1024)
+    )
 }
 
 impl MemoryManifest {

@@ -147,6 +147,7 @@ impl BackendConfig {
         let mut resolved = self.global_layers().build().into_config();
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
+        resolved.validate_snapshots()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         Ok(self)
     }

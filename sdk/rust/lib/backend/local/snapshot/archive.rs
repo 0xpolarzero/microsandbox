@@ -389,6 +389,7 @@ pub(super) async fn save_snapshot(
                 &head,
                 &opts,
                 dependencies.as_ref(),
+                local.config().fs_state_limit(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -403,6 +404,7 @@ pub(super) async fn save_snapshot(
                 &head,
                 &opts,
                 dependencies.as_ref(),
+                local.config().fs_state_limit(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -571,6 +573,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
 ///
 /// The runtime-owned checkpoint closure is read as the archive payload. No installed snapshot
 /// artifact or snapshot-index row is created.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn save_direct_checkpoint_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
@@ -579,6 +582,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
     out: &Path,
     plain_tar: bool,
     force: bool,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     manifest.validate().map_err(|error| {
@@ -613,6 +617,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
                 labels,
                 suggested_name,
                 checkpoint_closure,
+                fs_state_limit,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -626,6 +631,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
                 labels,
                 suggested_name,
                 checkpoint_closure,
+                fs_state_limit,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -827,6 +833,7 @@ async fn write_direct_checkpoint_archive_entries<W>(
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
     checkpoint_closure: &Path,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -869,6 +876,7 @@ where
         checkpoint_closure,
         &state.checkpoint_root,
         manifest,
+        fs_state_limit,
     )? {
         let written =
             append_artifact_file(builder, &member.source, &member.archive_path, member.kind)
@@ -1181,6 +1189,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 child_stage,
                 &manifest.root_disk,
                 choices,
+                local.config().fs_state_limit(),
             )
             .await?;
             install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1206,6 +1215,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             child_stage,
             &manifest.root_disk,
             choices,
+            local.config().fs_state_limit(),
         )
         .await?;
         install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
@@ -1299,11 +1309,12 @@ async fn write_archive_entries<W>(
     head: &Snapshot,
     opts: &SaveOpts,
     dependencies: Option<&delta::Dependencies>,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    let checkpoint_members = collect_checkpoint_archive_members(snapshots)?;
+    let checkpoint_members = collect_checkpoint_archive_members(snapshots, fs_state_limit)?;
     let mut inventory =
         build_archive_inventory(snapshots, cache_files, head, opts, &checkpoint_members).await?;
     if let Some(dependencies) = dependencies {
@@ -1678,6 +1689,7 @@ fn archive_requires(
 
 fn collect_checkpoint_archive_members(
     snapshots: &[Snapshot],
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<HashMap<String, Vec<CheckpointArchiveMember>>> {
     let mut collected = HashMap::new();
     for snapshot in snapshots {
@@ -1689,6 +1701,7 @@ fn collect_checkpoint_archive_members(
                     &snapshot.path().join(CHECKPOINT_DIRECTORY),
                     &state.checkpoint_root,
                     snapshot.manifest(),
+                    fs_state_limit,
                 )?,
             );
         } else {
@@ -1716,10 +1729,11 @@ fn checkpoint_archive_members(
     closure_root: &Path,
     checkpoint_root: &str,
     manifest: &microsandbox_image::snapshot::Manifest,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<Vec<CheckpointArchiveMember>> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure = CheckpointClosure::open_portable(closure_root, Some(&expected))
+    let closure = CheckpointClosure::open_portable(closure_root, Some(&expected), fs_state_limit)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     super::validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
     let prefix = format!("checkpoints/{snapshot_id}");
@@ -3474,6 +3488,7 @@ async fn materialize_inventory_layers(
 fn validate_inventory_snapshot_bindings(
     inventory: &ArchiveInventory,
     imported: &[Snapshot],
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()> {
     let snapshots: HashMap<&str, &Snapshot> = imported
         .iter()
@@ -3492,6 +3507,7 @@ fn validate_inventory_snapshot_bindings(
                 &snapshot.1.path().join(CHECKPOINT_DIRECTORY),
                 &state.checkpoint_root,
                 snapshot.1.manifest(),
+                fs_state_limit,
             )? {
                 checkpoint_entries.insert(
                     member.archive_path,
@@ -4929,7 +4945,7 @@ mod tests {
             .put_bytes(&memory.to_canonical_bytes().unwrap())
             .unwrap();
         let execution_id = store.put_bytes(b"execution").unwrap();
-        let fs_state_bytes = vec![0x5a; 2 * 1024 * 1024];
+        let fs_state_bytes = vec![0x5a; 6 * 1024 * 1024];
         let fs_state = store.put_bytes(&fs_state_bytes).unwrap();
         let layers = source.join("layers");
         std::fs::create_dir(&layers).unwrap();
@@ -5049,6 +5065,27 @@ mod tests {
             extensions: BTreeMap::new(),
             requires: Vec::new(),
         };
+        let error = save_direct_checkpoint_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "checkpoint-archive",
+            &source,
+            &archive,
+            false,
+            false,
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(!archive.exists());
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"snapshots": {"max_filesystem_state_mib": 8}}"#,
+        )
+        .unwrap();
         let local = crate::test_support::local_backend_builder(&home)
             .build()
             .await
@@ -5062,6 +5099,7 @@ mod tests {
             &archive,
             false,
             false,
+            local.config().fs_state_limit(),
         )
         .await
         .unwrap();

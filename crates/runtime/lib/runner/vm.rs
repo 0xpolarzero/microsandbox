@@ -311,6 +311,9 @@ pub struct VmConfig {
     /// Host-resolved placement behavior.
     pub placement_profile: Option<microsandbox_types::PlacementProfile>,
 
+    /// Virtio-fs backend state budget in bytes; the msb_krun default when unset.
+    pub fs_state_limit_bytes: Option<u64>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
 
@@ -469,6 +472,27 @@ struct RestoreEndpointPublication {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl VmConfig {
+    /// Virtio-fs backend state budget in bytes.
+    pub fn fs_state_limit(&self) -> usize {
+        self.fs_state_limit_bytes
+            .map_or(msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES, |bytes| {
+                bytes as usize
+            })
+    }
+
+    /// Check a launch-supplied virtio-fs state budget, which the SDK configures in whole MiB.
+    pub fn validate_fs_state_limit(bytes: Option<u64>) -> Result<(), String> {
+        const MIB: u64 = 1024 * 1024;
+        match bytes {
+            Some(bytes) if !(4 * MIB..=4095 * MIB).contains(&bytes) => Err(format!(
+                "filesystem state budget must be between 4 MiB and 4095 MiB, got {bytes} bytes"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl AgentTransportProfile {
     /// Whether this boot should provision the optional bulk port and advertise its kernel hint.
     ///
@@ -535,6 +559,7 @@ impl std::fmt::Debug for VmConfig {
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
             .field("placement_profile_name", &self.placement_profile_name)
+            .field("fs_state_limit_bytes", &self.fs_state_limit_bytes)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -1851,11 +1876,13 @@ fn build_vm(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
                     restore.memory_descriptor,
+                    vm.fs_state_limit(),
                 )
             } else {
                 crate::checkpoint::PreparedCheckpointRestore::open(
                     restore.closure.clone(),
                     &restore.checkpoint_root,
+                    vm.fs_state_limit(),
                 )
             }
             .map_err(|error| {
@@ -1877,7 +1904,11 @@ fn build_vm(
     let bind_identity_map = BindIdentityMapRegistration::new();
 
     let kernel_cmdline = agent_kernel_cmdline(vm.thp, config.agent_transport);
+    let device_state_limits =
+        msb_krun::DeviceStateLimits::default().with_fs_state_limit(vm.fs_state_limit());
+    microsandbox_filesystem::set_max_backend_state_bytes(device_state_limits.fs_state_limit());
     let mut builder = VmBuilder::new()
+        .device_state_limits(device_state_limits)
         .machine(|m| {
             let mut m = m
                 .vcpus(vm.vcpus)
@@ -3705,6 +3736,7 @@ fn agent_kernel_cmdline(
 
 #[cfg(test)]
 mod tests {
+    use super::VmConfig;
     #[cfg(feature = "net")]
     use super::to_krun_network_rate_limiters;
     use super::{
@@ -3752,6 +3784,23 @@ mod tests {
             readonly,
             snapshot_owned: true,
             lifecycle_owned: true,
+        }
+    }
+
+    #[test]
+    fn fs_state_limit_accepts_only_the_configurable_range() {
+        const MIB: u64 = 1024 * 1024;
+        for bytes in [None, Some(4 * MIB), Some(64 * MIB), Some(4095 * MIB)] {
+            assert!(
+                VmConfig::validate_fs_state_limit(bytes).is_ok(),
+                "{bytes:?}"
+            );
+        }
+        for bytes in [0, 3 * MIB, 4096 * MIB] {
+            assert!(
+                VmConfig::validate_fs_state_limit(Some(bytes)).is_err(),
+                "{bytes}"
+            );
         }
     }
 

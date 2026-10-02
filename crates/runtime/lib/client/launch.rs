@@ -76,6 +76,11 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub guest_clock: bool,
+
+    /// The launch field `fs_state_limit_bytes` is honored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub fs_state_limit: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -169,6 +174,11 @@ pub struct LaunchConfig {
     /// Backend-resolved protected cache for explicit memory captures and restores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_cache_dir: Option<PathBuf>,
+
+    /// Virtio-fs backend state budget in bytes. Omitted at the default, so runtimes that predate
+    /// the field keep accepting ordinary launches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_state_limit_bytes: Option<u64>,
 
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -632,6 +642,24 @@ mod tests {
 
         off["guest_clock"] = "host".into();
         assert!(decode(off).is_err());
+    }
+
+    #[test]
+    fn fs_state_limit_is_omitted_by_default_and_survives_the_handoff() {
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(default.get("fs_state_limit_bytes").is_none());
+        assert_eq!(decode(default).unwrap().fs_state_limit_bytes, None);
+
+        let config = LaunchConfig {
+            fs_state_limit_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(encoded["fs_state_limit_bytes"], 64 * 1024 * 1024);
+        assert_eq!(
+            decode(encoded).unwrap().fs_state_limit_bytes,
+            Some(64 * 1024 * 1024)
+        );
     }
 
     #[cfg(feature = "net")]

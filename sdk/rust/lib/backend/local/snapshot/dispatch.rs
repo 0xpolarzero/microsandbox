@@ -149,7 +149,7 @@ impl SnapshotBackend for LocalBackend {
                 snapshot.labels().clone(),
             );
             artifact.previous_upper = snapshot.previous_upper.clone();
-            verify::verify_snapshot(&artifact).await
+            verify::verify_snapshot(&artifact, self.config().fs_state_limit()).await
         })
     }
 

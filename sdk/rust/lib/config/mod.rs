@@ -63,6 +63,10 @@ pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 /// Default SSH session inactivity timeout in seconds.
 pub const DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 600;
 
+const DEFAULT_MAX_FILESYSTEM_STATE_MIB: u32 = 4;
+
+const MAX_FILESYSTEM_STATE_MIB_LIMIT: u32 = 4095;
+
 /// Default value for `metrics_sample_interval_ms` fields.
 pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
     NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
@@ -197,6 +201,10 @@ pub struct GlobalConfig {
     /// Live metrics registry configuration.
     #[config_patch(nested)]
     pub metrics: MetricsConfig,
+
+    /// Snapshot capture and restore limits.
+    #[config_patch(nested)]
+    pub snapshots: SnapshotsConfig,
 }
 
 /// Compatibility alias for the backend-owned global configuration.
@@ -213,6 +221,16 @@ pub struct SshConfig {
     ///
     /// A value of `0` disables the inactivity timeout.
     pub inactivity_timeout_secs: u64,
+}
+
+/// Snapshot capture and restore limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(ConfigPatch)]
+#[config_patch(serde)]
+pub struct SnapshotsConfig {
+    /// Virtio-fs backend state budget per device, in MiB. Valid values are 4 through 4095.
+    pub max_filesystem_state_mib: u32,
 }
 
 /// Live metrics registry configuration.
@@ -447,6 +465,29 @@ impl GlobalConfig {
         Ok(())
     }
 
+    /// Validate the snapshot limits.
+    pub(crate) fn validate_snapshots(&self) -> MicrosandboxResult<()> {
+        let mib = self.snapshots.max_filesystem_state_mib;
+        if !(DEFAULT_MAX_FILESYSTEM_STATE_MIB..=MAX_FILESYSTEM_STATE_MIB_LIMIT).contains(&mib) {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshots.max_filesystem_state_mib must be between \
+                 {DEFAULT_MAX_FILESYSTEM_STATE_MIB} and {MAX_FILESYSTEM_STATE_MIB_LIMIT}, got {mib}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Virtio-fs backend state budget per device, in bytes.
+    pub(crate) fn fs_state_limit(&self) -> usize {
+        self.snapshots.max_filesystem_state_mib as usize * 1024 * 1024
+    }
+
+    /// Launch override for the virtio-fs state budget, or `None` at the default.
+    pub(crate) fn fs_state_limit_override(&self) -> Option<u64> {
+        (self.snapshots.max_filesystem_state_mib != DEFAULT_MAX_FILESYSTEM_STATE_MIB)
+            .then(|| self.fs_state_limit() as u64)
+    }
+
     /// Resolve and structurally validate a host-owned placement profile.
     pub(crate) fn resolve_placement_profile(
         &self,
@@ -614,6 +655,14 @@ impl Default for SshConfig {
     fn default() -> Self {
         Self {
             inactivity_timeout_secs: DEFAULT_SSH_INACTIVITY_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl Default for SnapshotsConfig {
+    fn default() -> Self {
+        Self {
+            max_filesystem_state_mib: DEFAULT_MAX_FILESYSTEM_STATE_MIB,
         }
     }
 }
@@ -838,7 +887,8 @@ mod tests {
                 }}
             },
             "ssh": {"inactivity_timeout_secs": 45},
-            "metrics": {"capacity": 128}
+            "metrics": {"capacity": 128},
+            "snapshots": {"max_filesystem_state_mib": 64}
         });
         let config: GlobalConfig = serde_json::from_value(expected.clone()).unwrap();
         let patch: GlobalConfigPatch = saved_patch(&config);
@@ -1340,6 +1390,31 @@ mod tests {
         let json = r#"{"ssh": {"inactivity_timeout_secs": 1800}}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.ssh.inactivity_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn snapshot_filesystem_state_budget_is_range_checked() {
+        let parse = |mib: u32| -> GlobalConfig {
+            serde_json::from_value(serde_json::json!({
+                "snapshots": {"max_filesystem_state_mib": mib}
+            }))
+            .unwrap()
+        };
+        for mib in [3, 4096] {
+            let error = parse(mib).validate_snapshots().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib must be between 4 and 4095")
+            );
+        }
+        for mib in [4, 4095] {
+            parse(mib).validate_snapshots().unwrap();
+        }
+        let cfg = parse(64);
+        assert_eq!(cfg.fs_state_limit(), 64 * 1024 * 1024);
+        assert_eq!(cfg.fs_state_limit_override(), Some(64 * 1024 * 1024));
+        assert_eq!(GlobalConfig::default().fs_state_limit_override(), None);
     }
 
     #[test]

@@ -118,6 +118,7 @@ impl PreparedCheckpointRestore {
         root: PathBuf,
         expected_id: &str,
         memory_descriptor: bool,
+        fs_state_limit: usize,
     ) -> Result<Self, String> {
         let state = super::LocalBranchState::open(&root).map_err(|e| e.to_string())?;
         if state.id != expected_id {
@@ -136,7 +137,13 @@ impl PreparedCheckpointRestore {
         if execution.pause_generation() != state.pause_generation {
             return Err("branch execution epoch differs".into());
         }
-        let devices = decode_devices(&state.devices, state.pause_generation, read)?;
+        let devices = decode_devices(
+            &state.devices,
+            state.pause_generation,
+            fs_state_limit,
+            |id| super::LocalBranchState::object_len(&root, id).map_err(|e| e.to_string()),
+            read,
+        )?;
         let resource = state
             .resources
             .iter()
@@ -196,11 +203,15 @@ impl PreparedCheckpointRestore {
     }
 
     /// Resolve and decode every construction-time state envelope before building the VM.
-    pub(crate) fn open(root: PathBuf, expected_root: &str) -> Result<Self, String> {
+    pub(crate) fn open(
+        root: PathBuf,
+        expected_root: &str,
+        fs_state_limit: usize,
+    ) -> Result<Self, String> {
         let total_started = Instant::now();
         let expected = ObjectId::new(expected_root).map_err(|error| error.to_string())?;
         let closure_started = Instant::now();
-        let closure = CheckpointClosure::open(root, Some(&expected))
+        let closure = CheckpointClosure::open(root, Some(&expected), fs_state_limit)
             .map_err(|error| format!("validate checkpoint closure: {error}"))?;
         let closure_open_us = closure_started.elapsed().as_micros();
         let pause_generation = closure.checkpoint().pause_generation;
@@ -226,6 +237,8 @@ impl PreparedCheckpointRestore {
         let devices = decode_devices(
             &closure.checkpoint().devices,
             pause_generation,
+            fs_state_limit,
+            |id| closure.object_len(id).map_err(|e| e.to_string()),
             |id, limit| closure.read_object(id, limit).map_err(|e| e.to_string()),
         )?;
         let devices_us = devices_started.elapsed().as_micros();
@@ -492,11 +505,28 @@ impl RestoredAgentState {
 fn decode_devices(
     references: &[microsandbox_image::checkpoint::DeviceStateRef],
     pause_generation: u64,
+    fs_state_limit: usize,
+    object_len: impl Fn(&ObjectId) -> Result<u64, String>,
     mut read: impl FnMut(&ObjectId, u64) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<PreparedDeviceRestore>, String> {
+    let codec = msb_krun::DeviceStateCodec::new(
+        msb_krun::DeviceStateLimits::default().with_fs_state_limit(fs_state_limit),
+    );
     let mut devices = Vec::with_capacity(references.len());
     for device in references {
-        let bytes = read(&device.state, device.max_state_bytes())
+        let max_state_bytes = device.max_state_bytes(fs_state_limit);
+        if device.is_virtio_fs()
+            && object_len(&device.state)
+                .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?
+                > max_state_bytes
+        {
+            return Err(format!(
+                "read checkpoint device {}: {}",
+                device.device_id,
+                microsandbox_image::checkpoint::fs_state_budget_error(fs_state_limit)
+            ));
+        }
+        let bytes = read(&device.state, max_state_bytes)
             .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
         if device.device_type == 2 {
             let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {
@@ -516,7 +546,7 @@ fn decode_devices(
                 state,
             });
         } else {
-            let state = msb_krun::VirtioDeviceState::decode(&bytes).map_err(|error| {
+            let state = codec.decode(&bytes).map_err(|error| {
                 format!(
                     "decode checkpoint virtio device {}: {error}",
                     device.device_id
@@ -616,6 +646,8 @@ fn parse_restored_agent_resource(
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_image::checkpoint::DeviceStateRef;
+
     use super::*;
 
     fn agent_resource(protocol_generation: u8) -> ResourceDescriptor {
@@ -657,6 +689,60 @@ mod tests {
                 ),
             ]),
         }
+    }
+
+    #[test]
+    fn device_state_limits_match_the_vm_library() {
+        const MIB: usize = 1024 * 1024;
+        for device_type in [26, 2] {
+            let reference = DeviceStateRef {
+                device_type,
+                device_id: "device".into(),
+                state: ObjectId::from_bytes(b"state").unwrap(),
+            };
+            for limit in [
+                msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+                8 * MIB,
+                4095 * MIB,
+            ] {
+                let codec = msb_krun::DeviceStateCodec::new(
+                    msb_krun::DeviceStateLimits::default().with_fs_state_limit(limit),
+                );
+                assert_eq!(
+                    reference.max_state_bytes(limit),
+                    codec.max_state_bytes(device_type) as u64,
+                    "type {device_type}, limit {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_virtio_fs_state_names_the_budget_setting() {
+        const MIB: u64 = 1024 * 1024;
+        let references = [DeviceStateRef {
+            device_type: 26,
+            device_id: "fs".into(),
+            state: ObjectId::from_bytes(b"state").unwrap(),
+        }];
+        let object_len = |_: &ObjectId| Ok(5 * MIB + 23);
+
+        let error = decode_devices(&references, 1, 4 * MIB as usize, object_len, |_, _| {
+            panic!("an oversized state must be refused before it is read")
+        })
+        .err()
+        .unwrap();
+        assert!(
+            error.contains("snapshots.max_filesystem_state_mib"),
+            "{error}"
+        );
+
+        let error = decode_devices(&references, 1, 64 * MIB as usize, object_len, |_, _| {
+            Err("read reached".into())
+        })
+        .err()
+        .unwrap();
+        assert!(error.contains("read reached"), "{error}");
     }
 
     #[test]

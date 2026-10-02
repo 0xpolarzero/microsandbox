@@ -74,6 +74,7 @@ pub(crate) struct CheckpointCoordinator {
     inherited_memory: Option<LocalMemoryPin>,
     boot_geometry: (u8, u8, u32, u32),
     guest_clock: microsandbox_types::GuestClockPolicy,
+    fs_state_limit: usize,
 }
 
 /// Published checkpoint identity returned to the control executor.
@@ -489,6 +490,7 @@ impl CheckpointCoordinator {
             inherited_memory: None,
             boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
             guest_clock: vm.guest_clock,
+            fs_state_limit: vm.fs_state_limit(),
         })
     }
 
@@ -1495,7 +1497,11 @@ impl CheckpointCoordinator {
                         "virtio state belongs to another pause generation",
                     ));
                 }
-                state.encode().map_err(CheckpointFailure::resumable)?
+                msb_krun::DeviceStateCodec::new(
+                    msb_krun::DeviceStateLimits::default().with_fs_state_limit(self.fs_state_limit),
+                )
+                .encode(&state)
+                .map_err(CheckpointFailure::resumable)?
             };
             pending_devices.push(PendingDeviceState {
                 device_type: *device_type,

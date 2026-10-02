@@ -14,15 +14,11 @@ use microsandbox_protocol::core::{
 };
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
-use super::coordinator::TYPE_FS;
-
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
 const MAX_EXECUTION_STATE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
-const MAX_FS_DEVICE_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEMORY_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
@@ -500,12 +496,7 @@ fn decode_devices(
 ) -> Result<Vec<PreparedDeviceRestore>, String> {
     let mut devices = Vec::with_capacity(references.len());
     for device in references {
-        let max_state_bytes = if device.device_type == TYPE_FS {
-            MAX_FS_DEVICE_STATE_BYTES
-        } else {
-            MAX_DEVICE_STATE_BYTES
-        };
-        let bytes = read(&device.state, max_state_bytes)
+        let bytes = read(&device.state, device.max_state_bytes())
             .map_err(|error| format!("read checkpoint device {}: {error}", device.device_id))?;
         if device.device_type == 2 {
             let state = msb_krun::BlockDeviceState::decode(&bytes).map_err(|error| {

@@ -16,6 +16,10 @@ use super::ObjectId;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 4096;
 const MAX_MEMORY_EXTENTS: usize = 4 * 1024 * 1024;
+const VIRTIO_TYPE_FS: u32 = 26;
+const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
+// A virtio-fs state records every guest inode the device retains, so it outgrows other devices.
+const MAX_FS_DEVICE_STATE_BYTES: u64 = 8 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -189,6 +193,16 @@ pub struct CheckpointManifest {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl DeviceStateRef {
+    /// Largest encoded state object admitted for this device type.
+    pub fn max_state_bytes(&self) -> u64 {
+        match self.device_type {
+            VIRTIO_TYPE_FS => MAX_FS_DEVICE_STATE_BYTES,
+            _ => MAX_DEVICE_STATE_BYTES,
+        }
+    }
+}
 
 impl MemoryManifest {
     fn validate_body(&self) -> ImageResult<()> {

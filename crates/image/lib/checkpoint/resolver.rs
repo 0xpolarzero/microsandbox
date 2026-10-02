@@ -22,7 +22,6 @@ use crate::error::{ImageError, ImageResult};
 const CHECKPOINT_ROOT_FILE: &str = "checkpoint.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXECUTION_STATE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -114,7 +113,7 @@ impl CheckpointClosure {
             MAX_EXECUTION_STATE_BYTES,
         )?;
         for device in &checkpoint.devices {
-            read_object_verified(&root, &device.state, MAX_DEVICE_STATE_BYTES)?;
+            read_object_verified(&root, &device.state, device.max_state_bytes())?;
         }
 
         let mut disks = Vec::with_capacity(checkpoint.disks.len());
@@ -567,6 +566,39 @@ mod tests {
 
         assert_eq!(closure.root_id(), &expected);
         assert_eq!(closure.memory().pause_generation, 7);
+    }
+
+    #[test]
+    fn device_state_limit_depends_on_device_type() {
+        const MIB: usize = 1024 * 1024;
+        const FS: u32 = 26;
+        // (device type, state bytes, admitted)
+        let cases = [
+            (FS, MIB + 1, true),
+            (FS, 8 * MIB, true),
+            (FS, 8 * MIB + 1, false),
+            (4, MIB, true),
+            (4, MIB + 1, false),
+        ];
+        for (device_type, len, admitted) in cases {
+            let (directory, root) = fixture();
+            let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
+            let mut checkpoint =
+                CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
+            checkpoint.devices[0].device_type = device_type;
+            checkpoint.devices[0].state = store.put_bytes(&vec![7; len]).unwrap();
+            let root_bytes = checkpoint.to_canonical_bytes().unwrap();
+            let root = ObjectId::from_bytes(&root_bytes).unwrap();
+            std::fs::write(directory.path().join(CHECKPOINT_ROOT_FILE), root_bytes).unwrap();
+
+            let results = [
+                CheckpointClosure::open(directory.path(), Some(&root)).map(drop),
+                CheckpointClosure::open_portable(directory.path(), Some(&root)).map(drop),
+            ];
+            for result in results {
+                assert_eq!(result.is_ok(), admitted, "type {device_type}, {len} bytes");
+            }
+        }
     }
 
     #[test]

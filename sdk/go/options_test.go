@@ -17,12 +17,12 @@ func TestWithImage(t *testing.T) {
 }
 
 func TestBranchIntegrityOption(t *testing.T) {
-	var options BranchOptions
-	if options.RecordIntegrity {
+	var options forkOptions
+	if options.recordIntegrity {
 		t.Fatal("branch integrity must be opt-in")
 	}
 	WithForkIntegrity()(&options)
-	if !options.RecordIntegrity {
+	if !options.recordIntegrity {
 		t.Fatal("explicit branch integrity option was lost")
 	}
 }
@@ -1118,13 +1118,12 @@ func TestSandboxConfigCompose(t *testing.T) {
 }
 
 func TestForkOptionsKeepBranchAliases(t *testing.T) {
-	var canonical ForkOptions
-	var legacy BranchOptions
+	var canonical forkOptions
+	var legacy forkOptions
 	WithForkIntegrity()(&canonical)
 	WithForkGuestFlush(GuestFlushRequired)(&canonical)
 	WithBranchIntegrity()(&legacy)
 	WithBranchGuestFlush(GuestFlushRequired)(&legacy)
-	// ForkOptions holds a map, so it cannot be compared with ==.
 	if !reflect.DeepEqual(canonical, legacy) {
 		t.Fatalf("legacy options differ: %#v versus %#v", canonical, legacy)
 	}

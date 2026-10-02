@@ -194,11 +194,11 @@ func TestRestoreRejectsNegativeLifetimes(t *testing.T) {
 
 func TestForkDiskVolumeReachesFFI(t *testing.T) {
 	diskPath := filepath.Join(t.TempDir(), "seed.img")
-	var options ForkOptions
+	var options forkOptions
 	WithForkVolumes(map[string]MountConfig{
 		"/data": Mount.Disk(diskPath, DiskOptions{Fstype: "ext4", Readonly: true}),
 	})(&options)
-	volumes, err := ffiForkVolumes(options.Volumes)
+	volumes, err := ffiForkVolumes(options.volumes)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,9 +43,6 @@ pub struct RestoreArgs {
     /// Destination resource bindings.
     #[command(flatten)]
     pub resources: RestoreResourceArgs,
-    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
-    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
-    pub mount_disk: Vec<String>,
     /// Destination controls applied before the restored workload can run.
     #[command(flatten)]
     pub controls: RestoreControlArgs,
@@ -63,6 +60,9 @@ pub struct RestoreResourceArgs {
     /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
     /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
     #[cfg(feature = "net")]
     #[arg(short, long)]
@@ -225,10 +225,6 @@ pub async fn run(
         builder = builder.snapshot_base(base);
     }
     builder = args.resources.apply_restore(builder)?;
-    for spec in &args.mount_disk {
-        let (guest, mount) = parse_explicit_disk_mount(spec)?;
-        builder = builder.volume(guest, |_| mount);
-    }
     builder = args.controls.apply(builder)?;
     let (mut progress, task) = builder.restore_with_progress()?;
     let mut display = if args.quiet {
@@ -269,6 +265,10 @@ macro_rules! apply_resources {
                 }
                 for volume in &self.volume {
                     let (guest, mount) = parse_restore_volume(volume)?;
+                    builder = builder.volume(guest, |_| mount);
+                }
+                for spec in &self.mount_disk {
+                    let (guest, mount) = parse_explicit_disk_mount(spec)?;
                     builder = builder.volume(guest, |_| mount);
                 }
                 for route in &self.vsock {
@@ -351,8 +351,8 @@ mod tests {
         let cli =
             TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
                 .unwrap();
-        assert_eq!(cli.args.mount_disk, [spec]);
-        let (guest, mount) = parse_explicit_disk_mount(&cli.args.mount_disk[0]).unwrap();
+        assert_eq!(cli.args.resources.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.resources.mount_disk[0]).unwrap();
         assert_eq!(guest, "/data2");
         match mount.build().unwrap() {
             microsandbox::sandbox::VolumeMount::DiskImage {
@@ -369,6 +369,28 @@ mod tests {
             }
             other => panic!("expected DiskImage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mount_disk_is_applied_with_the_shared_resource_args() {
+        let parse = |spec| {
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap()
+        };
+        let ok = parse("/images/seed.img:/data2:ro,fstype=ext4");
+        assert!(
+            ok.args
+                .resources
+                .apply_restore(Sandbox::restore("group:snap"))
+                .is_ok()
+        );
+        let bad = parse("/images/seed.img");
+        assert!(
+            bad.args
+                .resources
+                .apply_restore(Sandbox::restore("group:snap"))
+                .is_err()
+        );
     }
 
     #[test]

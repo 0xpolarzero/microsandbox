@@ -22,9 +22,12 @@ impl LocalBackend {
         name: &str,
         id: i32,
         ephemeral: bool,
+        transition_timeout: Option<Duration>,
     ) -> MicrosandboxResult<()> {
         let run_dir = self.config().run_dir();
-        let transition = Self::acquire_sandbox_transition_guard(&run_dir, name).await?;
+        let transition =
+            Self::acquire_sandbox_transition_guard_with_timeout(&run_dir, name, transition_timeout)
+                .await?;
         let (model, _) = match self.sandbox_handle_state_owned(name, Some(id), true).await {
             Ok(state) => state,
             Err(MicrosandboxError::SandboxNotFound(_)) if ephemeral => {
@@ -37,6 +40,7 @@ impl LocalBackend {
                         id,
                         None,
                         true,
+                        transition_timeout,
                         #[cfg(windows)]
                         None,
                     )
@@ -118,6 +122,7 @@ impl LocalBackend {
             id,
             run_id,
             model.ephemeral,
+            transition_timeout,
             #[cfg(windows)]
             owner,
         )
@@ -138,12 +143,18 @@ impl LocalBackend {
         id: i32,
         run_id: Option<i32>,
         ephemeral: bool,
+        transition_timeout: Option<Duration>,
         #[cfg(windows)] owner: Option<crate::runtime::ownership::RecordedOwner>,
     ) -> MicrosandboxResult<()> {
         let run_dir = self.config().run_dir();
         // Retain the pre-dispatch process object even if ephemeral teardown deletes its record.
         loop {
-            let transition = Self::acquire_sandbox_transition_guard(&run_dir, name).await?;
+            let transition = Self::acquire_sandbox_transition_guard_with_timeout(
+                &run_dir,
+                name,
+                transition_timeout,
+            )
+            .await?;
             // Reconcile a crashed owner using the existing recovery rules before inspecting the
             // selected run. A reused name or restarted run must never redirect this operation.
             let model = match self.sandbox_handle_state_owned(name, Some(id), true).await {
@@ -405,6 +416,7 @@ mod tests {
                     id,
                     Some(run_id),
                     false,
+                    None,
                     #[cfg(windows)]
                     None,
                 )
@@ -431,6 +443,7 @@ mod tests {
                 id,
                 Some(run_id),
                 false,
+                None,
                 #[cfg(windows)]
                 None,
             )
@@ -450,7 +463,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(80),
-                backend.stop_complete("delayed-teardown", id, false)
+                backend.stop_complete("delayed-teardown", id, false, None)
             )
             .await
             .is_err()
@@ -462,7 +475,7 @@ mod tests {
         );
         drop(ownership);
         backend
-            .stop_complete("delayed-teardown", id, false)
+            .stop_complete("delayed-teardown", id, false, None)
             .await
             .unwrap();
         crate::sandbox::remove_local_persisted_sandbox(&backend, "delayed-teardown", id)
@@ -494,6 +507,7 @@ mod tests {
                 id,
                 Some(run_id),
                 false,
+                None,
                 #[cfg(windows)]
                 None,
             )
@@ -612,14 +626,14 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(80),
-                backend.stop_complete("ephemeral-stop", id, true)
+                backend.stop_complete("ephemeral-stop", id, true, None)
             )
             .await
             .is_err()
         );
         drop(owner);
         backend
-            .stop_complete("ephemeral-stop", id, true)
+            .stop_complete("ephemeral-stop", id, true, None)
             .await
             .unwrap();
     }
@@ -656,8 +670,14 @@ mod tests {
         process.publish(&directory, &run, false).unwrap();
         let owner = crate::runtime::ownership::recorded_owner(&directory, &run).unwrap();
         std::fs::remove_file(directory.join("sdk-process.json")).unwrap();
-        let mut wait =
-            Box::pin(backend.wait_stop_complete("legacy-exit", id, Some(run_id), false, owner));
+        let mut wait = Box::pin(backend.wait_stop_complete(
+            "legacy-exit",
+            id,
+            Some(run_id),
+            false,
+            None,
+            owner,
+        ));
         let pending = tokio::time::timeout(Duration::from_millis(80), &mut wait)
             .await
             .is_err();

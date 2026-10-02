@@ -81,13 +81,26 @@ fn check_bind_roots_do_not_follow_symlinks(config: &SandboxConfig) -> Microsandb
             current.push(component);
             match std::fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let resolved = std::fs::canonicalize(host)
-                        .map(|path| format!("use the resolved path {} or ", path.display()))
-                        .unwrap_or_default();
+                    let message = if current == *host {
+                        format!("bind mount host path {} is a symlink", host.display())
+                    } else {
+                        format!(
+                            "bind mount host path {} goes through symlink {}",
+                            host.display(),
+                            current.display()
+                        )
+                    };
+                    let fix = match (std::fs::canonicalize(&current), std::fs::canonicalize(host)) {
+                        (Err(_), _) => "whose target does not exist".to_string(),
+                        (Ok(_), Ok(path)) => format!(
+                            "use the resolved path {} or add follow-root-symlinks",
+                            path.display()
+                        ),
+                        (Ok(_), Err(_)) => "add follow-root-symlinks".to_string(),
+                    };
+                    let separator = if fix.starts_with("whose") { ", " } else { "; " };
                     return Err(MicrosandboxError::InvalidConfig(format!(
-                        "bind mount host path {} goes through symlink {}; {resolved}add follow-root-symlinks",
-                        host.display(),
-                        current.display()
+                        "{message}{separator}{fix}"
                     )));
                 }
                 Ok(_) => {}

@@ -573,6 +573,17 @@ fn bind_mount_through_symlink_fails_early_unless_it_opts_out() {
         assert!(message.contains("symlink"), "{message}");
         assert!(message.contains("follow-root-symlinks"), "{message}");
     }
+    // The final component reads as a symlink; an ancestor is "gone through".
+    let message = resolve(link.clone(), false).unwrap_err().to_string();
+    assert!(message.contains("is a symlink"), "{message}");
+    let message = resolve(link.join("child"), false).unwrap_err().to_string();
+    assert!(message.contains("goes through symlink"), "{message}");
+    // A dangling link cannot be fixed by follow-root-symlinks.
+    let dangling = base.join("dangling");
+    std::os::unix::fs::symlink(base.join("gone"), &dangling).unwrap();
+    let message = resolve(dangling, false).unwrap_err().to_string();
+    assert!(message.contains("whose target does not exist"), "{message}");
+    assert!(!message.contains("follow-root-symlinks"), "{message}");
     resolve(link.clone(), true).unwrap();
     resolve(real.clone(), false).unwrap();
     // Missing paths are left to the runtime.

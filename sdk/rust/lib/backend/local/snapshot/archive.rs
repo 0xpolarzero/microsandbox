@@ -4189,9 +4189,9 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use microsandbox_image::checkpoint::{
-        CaptureIntent, CheckpointManifest, ContentRef, DiskGenerationManifest, DiskLayerRef,
-        LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
-        sparse_file_integrity,
+        CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
+        DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+        MemoryManifest, sparse_file_integrity,
     };
     use microsandbox_image::snapshot::{
         CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef,
@@ -4929,6 +4929,8 @@ mod tests {
             .put_bytes(&memory.to_canonical_bytes().unwrap())
             .unwrap();
         let execution_id = store.put_bytes(b"execution").unwrap();
+        let fs_state_bytes = vec![0x5a; 2 * 1024 * 1024];
+        let fs_state = store.put_bytes(&fs_state_bytes).unwrap();
         let layers = source.join("layers");
         std::fs::create_dir(&layers).unwrap();
         let layer_id = "layer_00000000000000000000000000000001";
@@ -5003,7 +5005,11 @@ mod tests {
             execution_state: execution_id,
             memory: memory_id,
             disks: vec![disk_id],
-            devices: Vec::new(),
+            devices: vec![DeviceStateRef {
+                device_type: 26,
+                device_id: "fs0".into(),
+                state: fs_state.clone(),
+            }],
             resources: Vec::new(),
             owned_volumes: Vec::new(),
             requires: Vec::new(),
@@ -5127,6 +5133,12 @@ mod tests {
                 .join(CHECKPOINT_DIRECTORY)
                 .join("checkpoint.json")
                 .is_file()
+        );
+        let imported_store =
+            LocalObjectStore::open(loaded.path().join(CHECKPOINT_DIRECTORY)).unwrap();
+        assert_eq!(
+            std::fs::read(imported_store.object_path(&fs_state)).unwrap(),
+            fs_state_bytes
         );
 
         let resaved = directory.path().join("checkpoint-resaved.tar.zst");

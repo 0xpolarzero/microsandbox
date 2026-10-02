@@ -596,7 +596,13 @@ mod tests {
                 CheckpointClosure::open_portable(directory.path(), Some(&root)).map(drop),
             ];
             for result in results {
-                assert_eq!(result.is_ok(), admitted, "type {device_type}, {len} bytes");
+                match result {
+                    Ok(()) => assert!(admitted, "type {device_type}, {len} bytes"),
+                    Err(error) => {
+                        assert!(!admitted, "type {device_type}, {len} bytes: {error}");
+                        assert!(error.to_string().contains("exceeds"), "{error}");
+                    }
+                }
             }
         }
     }

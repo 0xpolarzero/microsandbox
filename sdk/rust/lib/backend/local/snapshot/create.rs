@@ -410,7 +410,7 @@ async fn capture_installed(
             source_sandbox: &source_sandbox,
             root_disk,
             user: sandbox_config.spec.runtime.user.clone(),
-            external_mounts: uncaptured_mount_paths(&sandbox_config.spec.mounts),
+            external_mounts: uncaptured_mount_paths(&sandbox_config.spec.mounts)?,
         },
     )
     .await;
@@ -726,7 +726,7 @@ pub(super) async fn create_snapshot_archive(
     manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
         user: sandbox_config.spec.runtime.user.clone(),
     })?;
-    manifest.set_external_mounts(uncaptured_mount_paths(&sandbox_config.spec.mounts))?;
+    manifest.set_external_mounts(uncaptured_mount_paths(&sandbox_config.spec.mounts)?)?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -1325,7 +1325,9 @@ fn new_file_manifest_with_id(
 //--------------------------------------------------------------------------------------------------
 
 /// Guest paths of mounts backed by host state that a disk snapshot never captures.
-fn uncaptured_mount_paths(mounts: &[microsandbox_types::VolumeMount]) -> Vec<String> {
+fn uncaptured_mount_paths(
+    mounts: &[microsandbox_types::VolumeMount],
+) -> MicrosandboxResult<Vec<String>> {
     use microsandbox_types::VolumeMount;
     mounts
         .iter()
@@ -1337,7 +1339,12 @@ fn uncaptured_mount_paths(mounts: &[microsandbox_types::VolumeMount]) -> Vec<Str
                     | VolumeMount::DiskImage { .. }
             )
         })
-        .map(|mount| mount.guest().to_string())
+        .map(|mount| {
+            // Older versions saved guest paths as typed (`/data/`); restore compares canonical ones.
+            let mut mount = mount.clone();
+            microsandbox_types::canonicalize_volume_mounts(std::slice::from_mut(&mut mount))?;
+            Ok(mount.guest().to_string())
+        })
         .collect()
 }
 
@@ -2980,7 +2987,7 @@ mod tests {
     #[test]
     fn uncaptured_mount_paths_lists_only_host_backed_mounts() {
         let config = crate::sandbox::SandboxBuilder::new("source")
-            .volume("/data", |m| m.bind("/host/dir"))
+            .volume("/data//./", |m| m.bind("/host/dir"))
             .volume("/shared", |m| m.named("shared"))
             .volume("/disk", |m| m.disk("/host/disk.img"))
             .volume("/scratch", |m| m.tmpfs())
@@ -2988,9 +2995,10 @@ mod tests {
             .config
             .into_config();
         assert_eq!(
-            uncaptured_mount_paths(&config.spec.mounts),
+            uncaptured_mount_paths(&config.spec.mounts).unwrap(),
             ["/data", "/shared", "/disk"]
         );
+        assert_eq!(config.spec.mounts[0].guest(), "/data//./");
     }
 
     #[tokio::test]

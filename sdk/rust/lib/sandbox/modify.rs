@@ -8,7 +8,9 @@ use microsandbox_types::{
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 use crate::backend::{Backend, ControlSession};
-use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
+use crate::db::entity::{
+    sandbox as sandbox_entity, sandbox_label as sandbox_label_entity, volume as volume_entity,
+};
 use crate::error::{Operation, UnsupportedReason};
 use crate::size::Mebibytes;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -292,15 +294,18 @@ impl SandboxModificationBuilder {
         let active = handle.active_config().ok().flatten();
         let (live, _) =
             live_control(&self.backend, &self.name, status, &self.patch, self.policy).await?;
-        Ok(build_plan(
+        let mut plan = build_plan(
             self.name,
             status,
             &config,
             active.as_ref(),
             live,
-            self.patch,
+            self.patch.clone(),
             self.policy,
-        ))
+        );
+        plan.conflicts
+            .extend(mount_source_conflicts(&self.backend, &self.patch).await?);
+        Ok(plan)
     }
 
     /// Apply supported changes, preserving any earlier live effects on failure.
@@ -348,6 +353,9 @@ impl SandboxModificationBuilder {
             self.patch.clone(),
             self.policy,
         );
+        // Check mount sources before a restart-backed apply stops the VM.
+        plan.conflicts
+            .extend(mount_source_conflicts(&self.backend, &self.patch).await?);
 
         validate_apply_supported(&plan)?;
         if handle.local().is_some() {
@@ -2273,7 +2281,8 @@ fn resolve_mount_patch(
         let mut mount = requested.clone();
         let guest = canonical(mount.guest())?;
         if let VolumeMount::Named { create, .. } = &mut mount {
-            // Modify never provisions named volumes; the volume must already exist.
+            // Modify never provisions named volumes; the volume must already exist,
+            // which `mount_source_conflicts` checks before anything is stopped.
             *create = None;
         }
         if matches!(mount, VolumeMount::Owned { .. }) {
@@ -2416,6 +2425,48 @@ fn resolve_patch_mount_paths(patch: &mut SandboxModificationPatch) -> Microsandb
     let result = crate::backend::local::host_paths::resolve_host_paths(&mut config);
     patch.mounts = config.spec.mounts;
     result
+}
+
+/// Check that mounts added by the patch have a source, so a restart-backed
+/// apply cannot stop the VM and then fail to start it. Local backend only.
+async fn mount_source_conflicts(
+    backend: &Arc<dyn Backend>,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<Vec<ModificationConflict>> {
+    let mut conflicts = Vec::new();
+    let Some(local) = backend.as_local() else {
+        return Ok(conflicts);
+    };
+    for mount in &patch.mounts {
+        let guest = mount.guest();
+        let problem = match mount {
+            VolumeMount::Bind { host, .. } => tokio::fs::metadata(host)
+                .await
+                .err()
+                .map(|error| format!("{guest}: host path {}: {error}", host.display())),
+            VolumeMount::DiskImage { host, .. } => {
+                (!tokio::fs::metadata(host).await.is_ok_and(|m| m.is_file()))
+                    .then(|| format!("{guest}: disk image {} is not a file", host.display()))
+            }
+            VolumeMount::Named { name, .. } => {
+                let db = local.db().await?;
+                volume_entity::Entity::find()
+                    .filter(volume_entity::Column::Name.eq(name.as_str()))
+                    .one(db.read())
+                    .await?
+                    .is_none()
+                    .then(|| format!("{guest}: volume {name} does not exist; create it first"))
+            }
+            VolumeMount::Tmpfs { .. } | VolumeMount::Owned { .. } => None,
+        };
+        if let Some(message) = problem {
+            conflicts.push(ModificationConflict {
+                field: MOUNT_FIELD.to_string(),
+                message,
+            });
+        }
+    }
+    Ok(conflicts)
 }
 
 /// Persist the mount half of a patch into the desired config.
@@ -4846,6 +4897,61 @@ mod tests {
             },
         );
         assert!(noop.changes.is_empty() && noop.conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_missing_mount_sources_and_keeps_the_config() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let current = config(2, 1024);
+        sandbox_entity::ActiveModel {
+            name: Set(current.spec.name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let named = crate::sandbox::MountBuilder::new("/vol")
+            .named("nope")
+            .build()
+            .unwrap();
+        let missing = temp.path().join("missing");
+        let patch = SandboxModificationPatch {
+            mounts: vec![named, bind_mount("/gone", missing.to_str().unwrap(), false)],
+            ..SandboxModificationPatch::default()
+        };
+
+        let name = current.spec.name.clone();
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+        let plan = builder().dry_run().await.unwrap();
+        assert_eq!(plan.conflicts.len(), 2, "{:?}", plan.conflicts);
+        let error = builder().apply().await.unwrap_err().to_string();
+        assert!(error.contains("volume nope does not exist"), "{error}");
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &name)
+            .await
+            .unwrap();
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
     }
 
     #[test]

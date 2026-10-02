@@ -5077,7 +5077,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(
+            error.to_string().contains("max_filesystem_state_mib"),
+            "{error}"
+        );
         assert!(!archive.exists());
 
         std::fs::create_dir_all(&home).unwrap();

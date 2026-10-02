@@ -53,9 +53,9 @@ impl LocalBackend {
         self.control_session_with(name, false).await
     }
 
-    /// Like [`Self::control_session`], for the creator of a sandbox whose readiness is not yet
-    /// published (its catalog status is still `Starting`). Checkpoint restore reads the restored
-    /// CPU and memory targets there; the process and run identity checks are unchanged.
+    /// Like [`Self::control_session`], but also accepts a sandbox that is still `Starting`.
+    /// Only for the creator of a checkpoint restore, which reads the restored CPU and memory
+    /// targets before it publishes the sandbox as `Running`.
     pub(crate) async fn control_session_while_starting(
         &self,
         name: &str,

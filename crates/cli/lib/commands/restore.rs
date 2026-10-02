@@ -200,7 +200,7 @@ impl RestoreControlArgs {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Attach each `--mount-disk` spec as a restore volume; the only path `run` uses.
+/// Attach each `--mount-disk` spec as a restore volume.
 fn apply_mount_disks(
     mut builder: RestoreBuilder,
     specs: &[String],
@@ -406,8 +406,6 @@ mod tests {
 
     #[test]
     fn mount_disk_specs_are_applied_to_the_restore_builder() {
-        // RestoreBuilder state is private to the SDK; its restore_builder tests prove that
-        // `volume(..., disk)` lands in the config. Here, prove `run`'s helper parses and applies.
         let specs = ["/images/seed.img:/data2:ro,fstype=ext4".to_string()];
         assert!(apply_mount_disks(Sandbox::restore("group:snap"), &specs).is_ok());
         let bad = ["/images/seed.img".to_string()];

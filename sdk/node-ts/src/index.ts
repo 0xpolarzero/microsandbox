@@ -47,6 +47,7 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  ForkOptions,
   ForkOutcome,
   BranchOutcome,
 } from "./sandbox.js";

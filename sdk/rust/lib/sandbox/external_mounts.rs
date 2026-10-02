@@ -536,6 +536,12 @@ mod tests {
         assert!(error.contains("--volume SOURCE:GUEST"));
         assert!(!error.contains("select captured disks"));
 
+        let tmpfs = config(
+            crate::sandbox::SandboxBuilder::new("restore").volume("/data", |m| m.tmpfs()),
+            true,
+        );
+        assert!(require_guest_mounts(&tmpfs, paths.clone()).is_err());
+
         let mapped = config(
             crate::sandbox::SandboxBuilder::new("restore").volume("/data/", |m| m.bind("/tmp/d")),
             true,

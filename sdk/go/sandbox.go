@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -1288,7 +1289,23 @@ func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, e
 	if err := validateOwnedMounts(volumes); err != nil {
 		return nil, err
 	}
-	return buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes, nil
+	specs := buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes
+	// Fork is always local. Resolve host paths now so a later chdir cannot change
+	// which file the native fork opens.
+	for guestPath, spec := range specs {
+		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
+			if *hostPath == "" {
+				continue
+			}
+			abs, err := filepath.Abs(*hostPath)
+			if err != nil {
+				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
+			}
+			*hostPath = abs
+		}
+		specs[guestPath] = spec
+	}
+	return specs, nil
 }
 
 func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {

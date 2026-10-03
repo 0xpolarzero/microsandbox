@@ -280,10 +280,12 @@ impl JsMountBuilder {
 
     /// Tmpfs size cap in MiB (only valid with `.tmpfs()`).
     #[napi]
-    pub fn size(&mut self, mib: u32) -> &Self {
+    pub fn size(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.size(Mebibytes::from(mib)));
-        self
+        Ok(self)
     }
 
     /// Guest-write quota in MiB (only valid with `.bind()`).
@@ -291,10 +293,12 @@ impl JsMountBuilder {
     /// Bounds how much the guest may add beyond the bind-mounted directory's
     /// existing contents. Without it, a protective default is applied.
     #[napi]
-    pub fn quota(&mut self, mib: u32) -> &Self {
+    pub fn quota(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
+
         let prev = self.take_inner();
         self.inner = Some(prev.quota(Mebibytes::from(mib)));
-        self
+        Ok(self)
     }
 
     /// Set the guest stat virtualization policy.
@@ -634,10 +638,10 @@ impl JsBuiltVolumeMount {
         // `quota_mib`, which modify never uses; owned mounts consumed theirs above.
         if !matches!(self.kind.as_str(), "named" | "owned") {
             if let Some(size) = self.size_mib {
-                builder.size(size);
+                builder.size(f64::from(size))?;
             }
             if let Some(quota) = self.quota_mib {
-                builder.quota(quota);
+                builder.quota(f64::from(quota))?;
             }
         }
         if let Some(format) = self.format.clone() {

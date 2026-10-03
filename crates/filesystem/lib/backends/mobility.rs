@@ -1,7 +1,6 @@
 //! Bounded framing helpers for filesystem backend state.
 
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bincode::config;
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,28 +12,12 @@ use serde::{Serialize, de::DeserializeOwned};
 const SCHEMA: u16 = 1;
 const HEADER_BYTES: usize = 10;
 const MIB: usize = 1024 * 1024;
-const DEFAULT_BACKEND_STATE_LIMIT: usize = 4 * MIB;
-
-static BACKEND_STATE_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_BACKEND_STATE_LIMIT);
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Sets the largest backend state, in bytes, that this process encodes or decodes.
-pub fn set_max_backend_state_bytes(bytes: usize) {
-    BACKEND_STATE_LIMIT.store(bytes, Ordering::Relaxed);
-}
-
-pub(crate) fn encode<T: Serialize>(kind: &[u8; 8], state: &T) -> io::Result<Vec<u8>> {
-    encode_with_limit(kind, state, BACKEND_STATE_LIMIT.load(Ordering::Relaxed))
-}
-
-pub(crate) fn decode<T: DeserializeOwned>(kind: &[u8; 8], bytes: &[u8]) -> io::Result<T> {
-    decode_with_limit(kind, bytes, BACKEND_STATE_LIMIT.load(Ordering::Relaxed))
-}
-
-fn encode_with_limit<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn encode<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> io::Result<Vec<u8>> {
     let config = config::standard()
         .with_little_endian()
         .with_fixed_int_encoding();
@@ -60,7 +43,7 @@ fn encode_with_limit<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> i
     Ok(bytes)
 }
 
-fn decode_with_limit<T: DeserializeOwned>(
+pub(crate) fn decode<T: DeserializeOwned>(
     kind: &[u8; 8],
     bytes: &[u8],
     limit: usize,
@@ -78,13 +61,21 @@ fn decode_with_limit<T: DeserializeOwned>(
         ));
     }
 
+    let payload = &bytes[HEADER_BYTES..];
     let (state, consumed) = match limit {
-        limit if limit <= 4 * MIB => decode_tier::<{ 4 * MIB }, T>(&bytes[HEADER_BYTES..]),
-        limit if limit <= 16 * MIB => decode_tier::<{ 16 * MIB }, T>(&bytes[HEADER_BYTES..]),
-        limit if limit <= 64 * MIB => decode_tier::<{ 64 * MIB }, T>(&bytes[HEADER_BYTES..]),
-        limit if limit <= 256 * MIB => decode_tier::<{ 256 * MIB }, T>(&bytes[HEADER_BYTES..]),
-        limit if limit <= 1024 * MIB => decode_tier::<{ 1024 * MIB }, T>(&bytes[HEADER_BYTES..]),
-        _ => decode_tier::<{ 4095 * MIB }, T>(&bytes[HEADER_BYTES..]),
+        limit if limit <= MIB => decode_tier::<{ MIB }, T>(payload),
+        limit if limit <= 2 * MIB => decode_tier::<{ 2 * MIB }, T>(payload),
+        limit if limit <= 4 * MIB => decode_tier::<{ 4 * MIB }, T>(payload),
+        limit if limit <= 8 * MIB => decode_tier::<{ 8 * MIB }, T>(payload),
+        limit if limit <= 16 * MIB => decode_tier::<{ 16 * MIB }, T>(payload),
+        limit if limit <= 32 * MIB => decode_tier::<{ 32 * MIB }, T>(payload),
+        limit if limit <= 64 * MIB => decode_tier::<{ 64 * MIB }, T>(payload),
+        limit if limit <= 128 * MIB => decode_tier::<{ 128 * MIB }, T>(payload),
+        limit if limit <= 256 * MIB => decode_tier::<{ 256 * MIB }, T>(payload),
+        limit if limit <= 512 * MIB => decode_tier::<{ 512 * MIB }, T>(payload),
+        limit if limit <= 1024 * MIB => decode_tier::<{ 1024 * MIB }, T>(payload),
+        limit if limit <= 2048 * MIB => decode_tier::<{ 2048 * MIB }, T>(payload),
+        _ => decode_tier::<{ 4095 * MIB }, T>(payload),
     }?;
     if HEADER_BYTES + consumed != bytes.len() {
         return Err(io::Error::new(
@@ -125,21 +116,28 @@ mod tests {
         value: u64,
     }
 
+    const DEFAULT_LIMIT: usize = 4 * MIB;
+
     #[test]
     fn framed_state_round_trips_and_rejects_trailing_bytes() {
-        let encoded = encode(KIND, &State { value: 42 }).unwrap();
-        assert_eq!(decode::<State>(KIND, &encoded).unwrap().value, 42);
+        let encoded = encode(KIND, &State { value: 42 }, DEFAULT_LIMIT).unwrap();
+        assert_eq!(
+            decode::<State>(KIND, &encoded, DEFAULT_LIMIT)
+                .unwrap()
+                .value,
+            42
+        );
 
         let mut trailing = encoded;
         trailing.push(0);
-        assert!(decode::<State>(KIND, &trailing).is_err());
+        assert!(decode::<State>(KIND, &trailing, DEFAULT_LIMIT).is_err());
     }
 
     #[test]
     fn state_size_follows_the_budget() {
         let state = vec![7u8; 5 * MIB];
 
-        let error = encode_with_limit(KIND, &state, DEFAULT_BACKEND_STATE_LIMIT).unwrap_err();
+        let error = encode(KIND, &state, DEFAULT_LIMIT).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -147,14 +145,32 @@ mod tests {
         );
 
         for limit in [8 * MIB, 4095 * MIB] {
-            let encoded = encode_with_limit(KIND, &state, limit).unwrap();
-            assert_eq!(
-                decode_with_limit::<Vec<u8>>(KIND, &encoded, limit).unwrap(),
-                state
-            );
+            let encoded = encode(KIND, &state, limit).unwrap();
+            assert_eq!(decode::<Vec<u8>>(KIND, &encoded, limit).unwrap(), state);
         }
 
-        let encoded = encode_with_limit(KIND, &state, 8 * MIB).unwrap();
-        assert!(decode_with_limit::<Vec<u8>>(KIND, &encoded, DEFAULT_BACKEND_STATE_LIMIT).is_err());
+        let encoded = encode(KIND, &state, 8 * MIB).unwrap();
+        assert!(decode::<Vec<u8>>(KIND, &encoded, DEFAULT_LIMIT).is_err());
+        assert!(decode::<Vec<u8>>(KIND, &encoded, encoded.len() - 1).is_err());
+        assert!(decode::<Vec<u8>>(KIND, &encoded, encoded.len()).is_ok());
+    }
+
+    #[test]
+    fn state_below_the_default_budget_is_bounded() {
+        let state = vec![7u8; 2 * MIB];
+        assert!(encode(KIND, &state, MIB).is_err());
+        let encoded = encode(KIND, &state, 3 * MIB).unwrap();
+        assert!(decode::<Vec<u8>>(KIND, &encoded, MIB).is_err());
+        assert!(decode::<Vec<u8>>(KIND, &encoded, 3 * MIB).is_ok());
+    }
+
+    #[test]
+    fn malformed_length_prefix_does_not_allocate_beyond_the_budget() {
+        for limit in [MIB, 4 * MIB, 64 * MIB, 4095 * MIB] {
+            let mut malformed = Vec::from(&KIND[..]);
+            malformed.extend_from_slice(&SCHEMA.to_le_bytes());
+            malformed.extend_from_slice(&u64::MAX.to_le_bytes());
+            assert!(decode::<Vec<u8>>(KIND, &malformed, limit).is_err());
+        }
     }
 }

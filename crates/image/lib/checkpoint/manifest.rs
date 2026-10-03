@@ -17,10 +17,8 @@ const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 4096;
 const MAX_MEMORY_EXTENTS: usize = 4 * 1024 * 1024;
 const VIRTIO_TYPE_FS: u32 = 26;
-const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
-const FS_DEVICE_STATE_HEADER_BYTES: u64 = 22;
 #[cfg(test)]
-pub(crate) const DEFAULT_FS_STATE_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const DEFAULT_FS_STATE_LIMIT: usize = msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -206,11 +204,8 @@ impl DeviceStateRef {
     /// A virtio-fs state records every guest inode the device retains, so it carries the
     /// filesystem backend state of up to `fs_state_limit` bytes on top of the common device state.
     pub fn max_state_bytes(&self, fs_state_limit: usize) -> u64 {
-        if self.is_virtio_fs() {
-            FS_DEVICE_STATE_HEADER_BYTES + fs_state_limit as u64 + MAX_DEVICE_STATE_BYTES
-        } else {
-            MAX_DEVICE_STATE_BYTES
-        }
+        let limits = msb_krun::DeviceStateLimits::default().with_fs_state_limit(fs_state_limit);
+        msb_krun::DeviceStateCodec::new(limits).max_state_bytes(self.device_type) as u64
     }
 }
 

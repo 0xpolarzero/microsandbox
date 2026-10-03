@@ -24,8 +24,6 @@ pub mod backends;
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(any(unix, windows))]
-pub use backends::mobility::set_max_backend_state_bytes;
-#[cfg(any(unix, windows))]
 pub use backends::passthroughfs::ExternalCheckpointOptions;
 #[cfg(windows)]
 pub use backends::passthroughfs::{

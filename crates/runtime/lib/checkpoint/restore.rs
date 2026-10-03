@@ -692,32 +692,6 @@ mod tests {
     }
 
     #[test]
-    fn device_state_limits_match_the_vm_library() {
-        const MIB: usize = 1024 * 1024;
-        for device_type in [26, 2] {
-            let reference = DeviceStateRef {
-                device_type,
-                device_id: "device".into(),
-                state: ObjectId::from_bytes(b"state").unwrap(),
-            };
-            for limit in [
-                msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
-                8 * MIB,
-                4095 * MIB,
-            ] {
-                let codec = msb_krun::DeviceStateCodec::new(
-                    msb_krun::DeviceStateLimits::default().with_fs_state_limit(limit),
-                );
-                assert_eq!(
-                    reference.max_state_bytes(limit),
-                    codec.max_state_bytes(device_type) as u64,
-                    "type {device_type}, limit {limit}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn oversized_virtio_fs_state_names_the_budget_setting() {
         const MIB: u64 = 1024 * 1024;
         let references = [DeviceStateRef {

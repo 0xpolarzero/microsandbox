@@ -671,7 +671,9 @@ pub(crate) async fn validate_fs_state_limit(
         .await
         .ok()
         .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| capabilities.fs_state_limit);
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.fs_state_limit
+        });
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -1105,6 +1107,7 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
             r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":false}'"#,
             r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":"true"}'"#,
+            r#"printf '%s' '{"protocols":[1],"fs_state_limit":true}'"#,
         ] {
             let path = script(dir.path(), "unsupported-fs-state", response);
             let error = validate_fs_state_limit(&path, &global).await.unwrap_err();

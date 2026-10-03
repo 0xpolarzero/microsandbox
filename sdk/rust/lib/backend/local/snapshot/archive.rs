@@ -5203,5 +5203,26 @@ mod tests {
                 .join("checkpoint.json")
                 .is_file()
         );
+
+        let default_home = directory.path().join("default-home");
+        let receiving = crate::test_support::local_backend_builder(&default_home)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            receiving.config().fs_state_limit(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT
+        );
+        let error = load_snapshot(&receiving, &archive, None).await.unwrap_err();
+        assert!(
+            error.to_string().contains("max_filesystem_state_mib"),
+            "{error}"
+        );
+        assert!(
+            !receiving
+                .snapshots_dir()
+                .join(snapshot_id.as_str())
+                .exists()
+        );
     }
 }

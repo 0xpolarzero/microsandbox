@@ -14,6 +14,39 @@ const HEADER_BYTES: usize = 10;
 const MIB: usize = 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Output buffer that refuses to grow past the state budget.
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.limit {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "backend state exceeds its budget",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -21,26 +54,27 @@ pub(crate) fn encode<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> i
     let config = config::standard()
         .with_little_endian()
         .with_fixed_int_encoding();
-    let payload = bincode::serde::encode_to_vec(state, config).map_err(invalid_data)?;
-    let total = HEADER_BYTES
-        .checked_add(payload.len())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "backend state is too large"))?;
-    if total > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "filesystem state exceeds the {} MiB budget; raise snapshots.max_filesystem_state_mib \
-                 (a running sandbox keeps the budget it started with)",
-                limit / MIB
-            ),
-        ));
+    let mut writer = BoundedWriter {
+        bytes: Vec::with_capacity(HEADER_BYTES),
+        limit,
+        exceeded: false,
+    };
+    writer.bytes.extend_from_slice(kind);
+    writer.bytes.extend_from_slice(&SCHEMA.to_le_bytes());
+    if let Err(error) = bincode::serde::encode_into_std_write(state, &mut writer, config) {
+        if writer.exceeded {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "filesystem state exceeds the {} MiB budget; raise snapshots.max_filesystem_state_mib \
+                     (a running sandbox keeps the budget it started with)",
+                    limit / MIB
+                ),
+            ));
+        }
+        return Err(invalid_data(error));
     }
-
-    let mut bytes = Vec::with_capacity(total);
-    bytes.extend_from_slice(kind);
-    bytes.extend_from_slice(&SCHEMA.to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    Ok(bytes)
+    Ok(writer.bytes)
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(
@@ -162,6 +196,21 @@ mod tests {
         let encoded = encode(KIND, &state, 3 * MIB).unwrap();
         assert!(decode::<Vec<u8>>(KIND, &encoded, MIB).is_err());
         assert!(decode::<Vec<u8>>(KIND, &encoded, 3 * MIB).is_ok());
+    }
+
+    #[test]
+    fn encoding_stops_at_the_budget() {
+        use std::io::Write;
+
+        let mut writer = BoundedWriter {
+            bytes: Vec::new(),
+            limit: 8,
+            exceeded: false,
+        };
+        writer.write_all(&[1; 8]).unwrap();
+        assert!(writer.write_all(&[1]).is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.bytes.len(), 8);
     }
 
     #[test]

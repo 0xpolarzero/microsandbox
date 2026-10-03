@@ -212,7 +212,9 @@ async fn verify_checkpoint_closure(
     manifest: microsandbox_image::snapshot::Manifest,
     fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointVerifyStatus> {
+    let pin = super::lease::pin_source(&closure_path)?;
     tokio::task::spawn_blocking(move || {
+        let _lease = pin;
         let expected = ObjectId::new(&expected_root)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let closure =
@@ -232,10 +234,14 @@ async fn verify_checkpoint_closure(
 
 pub(super) async fn compute_merkle_integrity(path: &Path) -> MicrosandboxResult<UpperIntegrity> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || merkle_integrity_blocking(&path))
-        .await
-        .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
-        .map_err(Into::into)
+    let pin = super::lease::pin_source(&path)?;
+    tokio::task::spawn_blocking(move || {
+        let _pin = pin;
+        merkle_integrity_blocking(&path)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("snapshot integrity task: {error}")))?
+    .map_err(Into::into)
 }
 
 /// Compute current integrity through a handle the caller has already confined

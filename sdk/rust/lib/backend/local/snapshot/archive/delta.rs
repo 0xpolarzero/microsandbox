@@ -951,7 +951,8 @@ async fn validate_resolved(
     let target_memory = if dependencies.memory.is_empty() {
         BTreeSet::new()
     } else {
-        let snapshot = store::open_snapshot(local, artifact.to_string_lossy().as_ref()).await?;
+        let snapshot =
+            store::open_snapshot_leased(local, artifact.to_string_lossy().as_ref()).await?;
         memory_objects(&snapshot, fs_state_limit)?
     };
     if dependencies
@@ -994,9 +995,13 @@ async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()>
     }
     let source = source.to_path_buf();
     let target = target.to_path_buf();
-    tokio::task::spawn_blocking(move || microsandbox_utils::copy::fast_copy(&source, &target))
-        .await
-        .map_err(|error| MicrosandboxError::Runtime(format!("base payload copy: {error}")))??;
+    let pin = super::super::lease::pin_source(&source)?;
+    tokio::task::spawn_blocking(move || {
+        let _pin = pin;
+        microsandbox_utils::copy::fast_copy(&source, &target)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("base payload copy: {error}")))??;
     Ok(())
 }
 
@@ -1134,7 +1139,7 @@ pub(super) async fn open_base(
     // Admission has already anchored archive filenames. A remaining bare selector
     // belongs to the snapshot store and must not be reclassified after a cwd change.
     if !store::looks_like_path(input) || !path.is_file() {
-        let snapshot = store::open_snapshot(local, input).await?;
+        let snapshot = store::open_snapshot_leased(local, input).await?;
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
             Box::pin(snapshot.verify(local.config().fs_state_limit())).await?;
         }
@@ -1671,7 +1676,9 @@ mod tests {
             recorded.to_canonical_bytes().unwrap(),
         )
         .unwrap();
-        let snapshot = store::open_snapshot(&local, head_name).await.unwrap();
+        let snapshot = store::open_snapshot_leased(&local, head_name)
+            .await
+            .unwrap();
         snapshot
             .verify(crate::test_support::DEFAULT_FS_STATE_LIMIT)
             .await

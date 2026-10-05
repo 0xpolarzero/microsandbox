@@ -175,8 +175,9 @@ impl PySandboxHandle {
     /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
-    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
-    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
+    /// hosts, substitution, violation action, TLS identity requirement, and
+    /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
     ///
     /// `mounts` maps guest paths to `MountConfig` values and replaces any
     /// mount already at that path; `mounts_rm` removes mounts by guest path.

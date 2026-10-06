@@ -19,19 +19,3 @@ func TestBranchManyRejectsClosedLiveHandleBeforeNativeDispatch(t *testing.T) {
 		t.Fatalf("closed batch source returned outcomes: %+v", outcomes)
 	}
 }
-
-func TestForkVolumesRequireNativeSupport(t *testing.T) {
-	volumes := map[string]MountSpec{"/data": {Disk: "/images/seed.img"}}
-	var nativeError *Error
-	if err := validateForkVolumesSupport(volumes, false); !errors.As(err, &nativeError) || nativeError.Kind != KindUnsupportedOperation {
-		t.Fatalf("volumes reached an older library: %v", err)
-	}
-	for _, check := range []error{
-		validateForkVolumesSupport(volumes, true),
-		validateForkVolumesSupport(nil, false),
-	} {
-		if check != nil {
-			t.Fatal(check)
-		}
-	}
-}

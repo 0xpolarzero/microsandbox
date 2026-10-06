@@ -36,7 +36,7 @@ ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome
 
 `WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback.
 
-`WithForkVolumes` rebinds a captured disk to a host image consistent with the captured state, for example `WithForkVolumes(map[string]MountConfig{"/data": Mount.Disk("./seed.img", DiskOptions{})})`; a fork cannot add a new block device. Each child attaches the image directly, without a private copy, so batch forks shouldn't share a writable image. Use separate fork calls with separate images for writable disks. To share one image in a batch, capture the disk read-only and keep the supplied binding read-only. An older native library returns an unsupported-operation error instead of ignoring the volumes.
+`WithForkVolumes` rebinds a captured disk to a host image consistent with the captured state, for example `WithForkVolumes(map[string]MountConfig{"/data": Mount.Disk("./seed.img", DiskOptions{})})`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 `ForkOptions` and `BranchOptions` have been removed. Replace direct struct use and custom option functions with `WithForkIntegrity`, `WithForkGuestFlush`, and `WithForkVolumes`. Calls already using these functions are unchanged.
 

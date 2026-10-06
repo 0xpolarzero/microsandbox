@@ -2038,16 +2038,6 @@ fn apply_volume(
     Ok(builder.volume(guest_path, |_| mount))
 }
 
-/// Parse each fork volume into the mount that replaces the captured binding at its guest path.
-fn fork_volume_mounts(
-    volumes: &HashMap<String, MountSpec>,
-) -> Result<Vec<(String, microsandbox::sandbox::MountBuilder)>, FfiError> {
-    volumes
-        .iter()
-        .map(|(guest, spec)| Ok((guest.clone(), volume_mount(guest, spec)?)))
-        .collect()
-}
-
 fn volume_mount(
     guest_path: &str,
     m: &MountSpec,
@@ -3588,7 +3578,8 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            for (guest, mount) in fork_volume_mounts(&request.volumes)? {
+            for (guest, spec) in &request.volumes {
+                let mount = volume_mount(guest, spec)?;
                 builder = builder.volume(guest, |_| mount);
             }
             let outcomes = builder.fork().await.map_err(FfiError::from)?;
@@ -3617,30 +3608,6 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
             Ok(serde_json::json!({"outcomes": rows}).to_string())
         }))
     })
-}
-
-/// `msb_sandbox_branch_many` for requests carrying `volumes`; older libraries lack this symbol.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn msb_sandbox_branch_many_with_volumes(
-    cancel_id: u64,
-    handle: Handle,
-    source: *const c_char,
-    names: *const c_char,
-    record_integrity: bool,
-    buf: *mut c_uchar,
-    buf_len: usize,
-) -> *mut c_char {
-    unsafe {
-        msb_sandbox_branch_many(
-            cancel_id,
-            handle,
-            source,
-            names,
-            record_integrity,
-            buf,
-            buf_len,
-        )
-    }
 }
 
 /// Branch with explicit disk content integrity, retaining the original branch ABI.
@@ -8089,11 +8056,9 @@ mod tests {
             r#"{"names":["a"],"volumes":{"/data":{"disk":"/images/seed.img","fstype":"ext4","readonly":true}}}"#,
         )
         .unwrap();
-        let mut mounts = fork_volume_mounts(&request.volumes)
+        assert_eq!(request.volumes.len(), 1);
+        let mount = volume_mount("/data", &request.volumes["/data"])
             .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(mounts.len(), 1);
-        let (guest, mount) = mounts.remove(0);
-        assert_eq!(guest, "/data");
         match mount.build().unwrap() {
             microsandbox::sandbox::VolumeMount::DiskImage {
                 host,
@@ -8110,7 +8075,7 @@ mod tests {
             _ => panic!("expected a disk mount"),
         }
         let plain: BranchManyRequest = serde_json::from_str(r#"{"names":["a"]}"#).unwrap();
-        assert!(fork_volume_mounts(&plain.volumes).is_ok_and(|mounts| mounts.is_empty()));
+        assert!(plain.volumes.is_empty());
     }
 
     #[test]

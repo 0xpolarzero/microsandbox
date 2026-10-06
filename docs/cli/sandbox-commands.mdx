@@ -393,7 +393,7 @@ Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserv
 
 Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
 
-A fork cannot add a new block device. `--mount-disk` only rebinds a captured disk, such as a named disk volume, at `DEST` to a host image consistent with the captured state. The image is attached directly to every child, without a private copy, so batch forks shouldn't share a writable image: use separate fork calls with a separate image for each writable child, or capture the disk read-only and supply a `:ro` image.
+A fork cannot add a new block device. `--mount-disk` only rebinds a captured disk, such as a named disk volume, at `DEST` to a host image consistent with the captured state. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 

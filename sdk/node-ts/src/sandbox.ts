@@ -1,7 +1,7 @@
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
-import { forkMountBuilders, withForkVolumes, type ForkVolumes } from "./internal/fork-volumes.js";
+import { forkMountBuilders, type ForkVolumes } from "./internal/fork-volumes.js";
 import {
   compactionResultFromJson,
   type DiskCompactionOptions,
@@ -613,18 +613,18 @@ export class Sandbox implements AsyncDisposable {
   /** Create an independent local CoW child without a durable full snapshot. */
   async fork(name: string, options: ForkOptions = {}): Promise<Sandbox> {
     const volumes = forkMountBuilders(options.volumes);
-    const child = await withMappedErrors(() => volumes.length > 0
-      ? withForkVolumes(this.inner).forkWithVolumes(name, options.recordIntegrity, options.guestFlush, volumes)
-      : this.inner.fork(name, options.recordIntegrity, options.guestFlush));
+    const child = await withMappedErrors(() => this.inner.fork(
+      name, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return new Sandbox(child, name, false);
   }
 
   /** Capture once; return each named child's startup outcome in input order. */
   async forkMany(names: string[], options: ForkOptions = {}): Promise<ForkOutcome[]> {
     const volumes = forkMountBuilders(options.volumes);
-    const outcomes = await withMappedErrors(() => volumes.length > 0
-      ? withForkVolumes(this.inner).forkManyWithVolumes(names, options.recordIntegrity, options.guestFlush, volumes)
-      : this.inner.forkMany(names, options.recordIntegrity, options.guestFlush));
+    const outcomes = await withMappedErrors(() => this.inner.forkMany(
+      names, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return outcomes.map(o => o.sandbox
       ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
       : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use microsandbox::sandbox::MountBuilder as RustMountBuilder;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
@@ -106,50 +105,6 @@ impl Sandbox {
             stop_name,
             owns_lifecycle,
         }
-    }
-
-    async fn fork_with(
-        inner: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
-        name: String,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-        volumes: Vec<(String, RustMountBuilder)>,
-    ) -> Result<Sandbox> {
-        let sb = inner.get().await.ok_or_else(consumed_error)?;
-        let mut builder = sb
-            .fork(name)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        for (guest, mount) in volumes {
-            builder = builder.volume(guest, |_| mount);
-        }
-        Ok(Sandbox::from_rust(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
-    }
-
-    async fn fork_many_with(
-        inner: Arc<SharedHandle<microsandbox::sandbox::Sandbox>>,
-        names: Vec<String>,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-        volumes: Vec<(String, RustMountBuilder)>,
-    ) -> Result<Vec<JsBranchOutcome>> {
-        let sb = inner.get().await.ok_or_else(consumed_error)?;
-        let mut builder = sb
-            .fork_many(names)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        for (guest, mount) in volumes {
-            builder = builder.volume(guest, |_| mount);
-        }
-        Ok(branch_outcomes(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
     }
 }
 
@@ -611,99 +566,98 @@ impl Sandbox {
     }
 
     /// @deprecated Use fork for live execution duplication.
-    #[napi]
-    pub async fn branch(
-        &self,
-        name: String,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-    ) -> Result<Sandbox> {
-        self.fork(name, record_integrity, guest_flush).await
-    }
-
-    /// @deprecated Use forkMany for live execution duplication.
-    #[napi]
-    pub async fn branch_many(
-        &self,
-        names: Vec<String>,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-    ) -> Result<Vec<JsBranchOutcome>> {
-        self.fork_many(names, record_integrity, guest_flush).await
-    }
-
-    /// Create an independent local CoW child without a durable full snapshot.
-    #[napi]
-    pub async fn fork(
-        &self,
-        name: String,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-    ) -> Result<Sandbox> {
-        Self::fork_with(
-            self.inner.clone(),
-            name,
-            record_integrity,
-            guest_flush,
-            Vec::new(),
-        )
-        .await
-    }
-
-    /// Fork, rebinding captured volumes to the given mounts.
-    #[napi(js_name = "forkWithVolumes", ts_return_type = "Promise<Sandbox>")]
-    pub fn fork_with_volumes<'env>(
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn branch<'env>(
         &self,
         env: &'env Env,
         name: String,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-        volumes: Vec<&mut JsMountBuilder>,
+        volumes: Option<Vec<&mut JsMountBuilder>>,
     ) -> Result<PromiseRaw<'env, Sandbox>> {
-        // Consume the mounts on the JS thread so later changes to them or to the
-        // working directory do not affect this fork.
-        let volumes = JsMountBuilder::take_fork_volumes(volumes, self.backend_kind == "local");
+        self.fork(env, name, record_integrity, guest_flush, volumes)
+    }
+
+    /// @deprecated Use forkMany for live execution duplication.
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn branch_many<'env>(
+        &self,
+        env: &'env Env,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Vec<JsBranchOutcome>>> {
+        self.fork_many(env, names, record_integrity, guest_flush, volumes)
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn fork<'env>(
+        &self,
+        env: &'env Env,
+        name: String,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
         let inner = self.inner.clone();
+
         env.spawn_future(async move {
-            Self::fork_with(inner, name, record_integrity, guest_flush, volumes?).await
+            let volumes = volumes?;
+            let sb = inner.get().await.ok_or_else(consumed_error)?;
+            let mut builder = sb.fork(name);
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(Sandbox::from_rust(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
         })
     }
 
     /// Capture once and return individual child startup outcomes.
-    #[napi]
-    pub async fn fork_many(
-        &self,
-        names: Vec<String>,
-        record_integrity: Option<bool>,
-        guest_flush: Option<String>,
-    ) -> Result<Vec<JsBranchOutcome>> {
-        Self::fork_many_with(
-            self.inner.clone(),
-            names,
-            record_integrity,
-            guest_flush,
-            Vec::new(),
-        )
-        .await
-    }
-
-    /// Fork many, rebinding captured volumes to the given mounts.
-    #[napi(
-        js_name = "forkManyWithVolumes",
-        ts_return_type = "Promise<Array<JsBranchOutcome>>"
-    )]
-    pub fn fork_many_with_volumes<'env>(
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn fork_many<'env>(
         &self,
         env: &'env Env,
         names: Vec<String>,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-        volumes: Vec<&mut JsMountBuilder>,
+        volumes: Option<Vec<&mut JsMountBuilder>>,
     ) -> Result<PromiseRaw<'env, Vec<JsBranchOutcome>>> {
-        let volumes = JsMountBuilder::take_fork_volumes(volumes, self.backend_kind == "local");
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
         let inner = self.inner.clone();
+
         env.spawn_future(async move {
-            Self::fork_many_with(inner, names, record_integrity, guest_flush, volumes?).await
+            let volumes = volumes?;
+            let sb = inner.get().await.ok_or_else(consumed_error)?;
+            let mut builder = sb.fork_many(names);
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(branch_outcomes(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
         })
     }
 

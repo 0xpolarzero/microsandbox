@@ -130,7 +130,6 @@ typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint6
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
 typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
-typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_with_volumes_fn;
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -311,7 +310,6 @@ static msb_sandbox_pause_with_guest_flush_fn ptr_msb_sandbox_pause_with_guest_fl
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
-static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many_with_volumes = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -514,7 +512,6 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
-	RESOLVE_OPTIONAL(msb_sandbox_branch_many_with_volumes);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -765,10 +762,6 @@ char *call_msb_sandbox_pause_with_guest_flush(uint64_t cancel_id, uint64_t handl
 bool has_branch_many(void) { return ptr_msb_sandbox_branch_many != NULL; }
 char *call_msb_sandbox_branch_many(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_many ? ptr_msb_sandbox_branch_many(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
-}
-bool has_branch_many_volumes(void) { return ptr_msb_sandbox_branch_many_with_volumes != NULL; }
-char *call_msb_sandbox_branch_many_with_volumes(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_sandbox_branch_many_with_volumes ? ptr_msb_sandbox_branch_many_with_volumes(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_branch_with_options(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_with_options ? ptr_msb_sandbox_branch_with_options(cancel_id, handle, source, child, record_integrity, buf, buf_len) : NULL;
@@ -2829,9 +2822,6 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 	if err := checkGuestFlush(flush, false); err != nil {
 		return nil, err
 	}
-	if err := validateForkVolumesSupport(volumes, bool(C.has_branch_many_volumes())); err != nil {
-		return nil, err
-	}
 	if names == nil {
 		names = []string{}
 	}
@@ -2848,9 +2838,6 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cNames))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
-		if len(volumes) > 0 {
-			return C.call_msb_sandbox_branch_many_with_volumes(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
-		}
 		return C.call_msb_sandbox_branch_many(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
 	})
 	if err != nil {
@@ -2951,14 +2938,6 @@ func validateGuestFlushSupport(policy string, diskOnly, supported bool) error {
 	}
 	if (diskOnly || (policy != "" && policy != "auto")) && !supported {
 		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support guest flush policies; update the native SDK"}
-	}
-	return nil
-}
-
-// validateForkVolumesSupport prevents older native libraries from silently ignoring fork volumes.
-func validateForkVolumesSupport(volumes map[string]MountSpec, supported bool) error {
-	if len(volumes) > 0 && !supported {
-		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support fork volumes; update the native SDK"}
 	}
 	return nil
 }

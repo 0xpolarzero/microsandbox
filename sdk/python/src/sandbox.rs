@@ -2718,6 +2718,7 @@ mod tests {
 
     #[test]
     fn python_secret_modify_options_reach_rust_patch() {
+        let _guard = crate::helpers::tests::PYTHON_TYPES_LOCK.lock().unwrap();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             // Load the public Python types without requiring a built extension or VM.

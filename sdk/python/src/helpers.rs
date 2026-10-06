@@ -2390,10 +2390,13 @@ resource_builder!(microsandbox::sandbox::ForkManyBuilder);
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::ffi::CString;
 
     use super::*;
+
+    // Python imports can release the GIL while another test replaces sys.modules.
+    pub(crate) static PYTHON_TYPES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Load `microsandbox.types` without importing the native extension.
     fn volumes(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -2424,6 +2427,7 @@ mod tests {
 
     #[test]
     fn fork_volumes_are_copied_and_anchored_for_a_local_backend() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let mapping = volumes(py).unwrap();

@@ -1518,6 +1518,11 @@ pub(crate) fn build_secret_patches(
                                 "substitution.headers",
                                 &obj.getattr("headers")?,
                             )?,
+                            header_fields: obj.getattr("header_fields")?.extract().map_err(|_| {
+                                PyValueError::new_err(format!(
+                                    "secret {name:?}: \"substitution.header_fields\" must be a sequence of strings"
+                                ))
+                            })?,
                             query: extract_secret_bool(
                                 &name,
                                 "substitution.query",
@@ -2756,8 +2761,19 @@ mod tests {
             let patches = parse("dict(substitution=SecretSubstitution())").unwrap();
             let substitution = patches[0].substitution.as_ref().unwrap();
             assert!(substitution.headers);
+            assert!(substitution.header_fields.is_empty());
             assert!(!substitution.query);
             assert!(!substitution.body);
+
+            let patches = parse(
+                "dict(substitution=SecretSubstitution(header_fields=('authorization', 'x-api-key')))",
+            )
+            .unwrap();
+            let wire = serde_json::to_value(&patches[0]).unwrap();
+            assert_eq!(
+                wire["substitution"]["header_fields"],
+                serde_json::json!(["authorization", "x-api-key"])
+            );
 
             for expression in ["{}", "dict(value='private-material')"] {
                 let patches = parse(expression).unwrap();

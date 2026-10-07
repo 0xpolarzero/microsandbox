@@ -26,7 +26,7 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### fork() and fork_many()
 
@@ -35,7 +35,7 @@ let child = source.fork("experiment").fork().await?;
 let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
 ```
 
-`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
+`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. `.volume(guest, |v| v.disk(path))` rebinds a captured disk to a host image consistent with the captured state; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
 
 ### ForkOutcome
 
@@ -651,6 +651,8 @@ for r in &plan.resize_status {
 Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
 
 CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `.restart()` to apply now, or `.next_start()` to save for the next start. Omitted options keep their current settings.
 
 See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for all setters and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI.
 

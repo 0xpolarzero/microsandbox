@@ -3,6 +3,10 @@
 #[cfg(feature = "local")]
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "local")]
+use std::sync::Mutex;
+#[cfg(feature = "local")]
+use std::time::{Duration, Instant};
 
 #[cfg(all(feature = "local", not(target_os = "linux")))]
 use microsandbox_control_client::CreateBranch;
@@ -22,6 +26,14 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus, modify};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Bound recovery scans across batches and rapid checkpoint chains within this SDK process.
+#[cfg(feature = "local")]
+static LAST_MEMORY_SWEEP: Mutex<Option<Instant>> = Mutex::new(None);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -464,6 +476,7 @@ pub(crate) async fn capture_child(
         capture.state.validate_files(&closure)?;
         return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
     }
+    reclaim_abandoned_memory(&local.cache_dir().join("memory"));
     let record_integrity = source.record_integrity;
     // Child reservation precedes capture; source transition ownership now excludes restart or
     // replacement until the exact selected generation has handed off its state.
@@ -669,4 +682,77 @@ async fn adopt_capture(
     config.forked = true;
     config.suppress_launch_for_full_restore();
     Ok(pin)
+}
+
+/// Schedule crash recovery before source locking/freezing, with bounded work and scan frequency.
+#[cfg(feature = "local")]
+fn reclaim_abandoned_memory(root: &Path) {
+    let Ok(mut last) = LAST_MEMORY_SWEEP.try_lock() else {
+        return;
+    };
+    if last.is_some_and(|last| last.elapsed() < Duration::from_secs(30)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    drop(last);
+    let root = root.to_owned();
+    // Filesystem metadata and unlink may stall on cold or remote storage. Recovery is
+    // best-effort and must not occupy the async worker that drives branch capture.
+    tokio::task::spawn_blocking(move || {
+        let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
+            branches_only: true,
+            max_entries: Some(256),
+            ..Default::default()
+        };
+        if let Err(error) = microsandbox_runtime::checkpoint::prune_memory_cache(&root, &options) {
+            tracing::debug!(%error, "deferred abandoned branch memory cleanup");
+        }
+    });
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "local"))]
+mod tests {
+    use super::*;
+
+    fn fork() -> ForkBuilder {
+        let backend = crate::test_support::local_backend(Default::default());
+        ForkBuilder::new(
+            Arc::new(backend),
+            "source",
+            SandboxIdentity::Local(1),
+            "child".into(),
+        )
+    }
+
+    fn assert_disk_mount(config: &SandboxConfig) {
+        let mounts = &config.spec.mounts;
+        assert_eq!(mounts.len(), 1);
+        assert!(matches!(
+            &mounts[0],
+            crate::sandbox::VolumeMount::DiskImage { host, guest, .. }
+                if host == Path::new("/images/seed.img") && guest == "/data"
+        ));
+        assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    #[test]
+    fn fork_and_fork_many_accept_a_host_disk_volume() {
+        let disk = |v: crate::sandbox::MountBuilder| v.disk("/images/seed.img");
+        let single = fork().volume("/data", disk);
+        assert_disk_mount(&single.inner.config.clone().into_config());
+        let many = ForkManyBuilder::new(fork(), ["a", "b"]).volume("/data", disk);
+        assert_disk_mount(&many.inner.config.clone().into_config());
+    }
+
+    #[test]
+    fn a_later_disk_volume_replaces_a_bind_at_the_same_guest_path() {
+        let builder = fork()
+            .volume("/data", |v| v.bind("/host/data"))
+            .volume("/data", |v| v.disk("/images/seed.img"));
+        assert_disk_mount(&builder.inner.config.clone().into_config());
+    }
 }

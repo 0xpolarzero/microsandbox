@@ -76,6 +76,8 @@ export interface NativeBindings {
   readonly imageInspect: (reference: string) => Promise<NapiImageDetail>;
   readonly imageRemove: (reference: string, force?: boolean) => Promise<void>;
   readonly imagePrune: () => Promise<NapiImagePruneReport>;
+  readonly storageUsage?: () => Promise<NapiStorageUsage>;
+  readonly storagePrune?: (dryRun?: boolean, olderThanSeconds?: number) => Promise<NapiMemoryCacheReport>;
   readonly imageLoad: (
     inputPath: string,
     tag?: string,
@@ -351,12 +353,12 @@ export interface NapiSandbox {
   attachShell(): Promise<number>;
   restoreWarnings(): Promise<Array<{ guestPath: string; reason: string; staleInodes: bigint[] }>>;
   stop(): Promise<void>;
-  fork(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
   /** @deprecated Use fork() instead. */
-  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
-  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   /** @deprecated Use forkMany() instead. */
-  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -375,6 +377,7 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
   readonly name: string;
   readonly status: string;
@@ -394,12 +397,12 @@ export interface NapiSandboxHandle {
   connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   connectOrStart(detached?: boolean): Promise<NapiSandbox>;
   stop(): Promise<void>;
-  fork(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
+  fork(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
   /** @deprecated Use fork() instead. */
-  branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
-  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  branch(name: string, recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<NapiSandbox>;
+  forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   /** @deprecated Use forkMany() instead. */
-  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string, volumes?: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
   resume(): Promise<void>;
   requestStop(): Promise<void>;
@@ -710,6 +713,7 @@ export interface NapiSnapshotCopyBuilder
 }
 
 export interface NapiSnapshot {
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
   readonly path: string;
   readonly headUpdate: NapiHeadUpdate | null | undefined;
@@ -740,6 +744,7 @@ export interface NapiSnapshot {
 }
 
 export interface NapiSnapshotHandle {
+  storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly path: string;
   readonly id: string;
   readonly digest: string;
@@ -859,6 +864,7 @@ export interface NapiImageDetail extends NapiImageInfo {
 }
 
 export interface NapiImagePruneReport {
+  readonly skippedInUse?: number;
   readonly imageRefsRemoved: number;
   readonly manifestsRemoved: number;
   readonly layersRemoved: number;
@@ -1078,6 +1084,7 @@ export interface NapiSecretBuilder {
   allowPassthroughFor(host: string): this;
   requireTlsIdentity(enabled: boolean): this;
   substituteInHeaders(enabled: boolean): this;
+  substituteInHeaderFields(fields: string[]): this;
   substituteInQuery(enabled: boolean): this;
   substituteInBody(enabled: boolean): this;
   violationAction(action: string): this;
@@ -1092,12 +1099,14 @@ export interface NapiSecretEntry {
   readonly allowedHostPatterns: string[];
   readonly allowAnyHost: boolean;
   readonly passthroughHosts: string[];
+  readonly violationAction?: string;
   readonly requireTlsIdentity: boolean;
   readonly substitution: NapiSecretSubstitution;
 }
 
 export interface NapiSecretSubstitution {
   readonly headers: boolean;
+  readonly headerFields: string[];
   readonly query: boolean;
   readonly body: boolean;
 }
@@ -1402,4 +1411,54 @@ export interface NapiRootDiskBuilder {
   fstype(fstype: string): this;
   /** Private flat-root clone strategy. */
   cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
+}
+
+
+export interface NapiStorageUsage {
+  readonly images: NapiStorageCategoryUsage;
+  readonly snapshots: NapiStorageCategoryUsage;
+  readonly sandboxes: NapiStorageCategoryUsage;
+  readonly volumes: NapiStorageCategoryUsage;
+  readonly branchMemory: NapiStorageCategoryUsage;
+  readonly snapshotMemory: NapiStorageCategoryUsage;
+  readonly notes: string[];
+}
+
+export interface NapiStorageCategoryUsage {
+  readonly count: number | null | undefined;
+  readonly inUse: number | null | undefined;
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly reclaimableLogicalBytes: bigint | null | undefined;
+  readonly items: NapiStorageItemUsage[];
+  readonly notes: string[];
+}
+
+export interface NapiStorageItemUsage {
+  readonly name: string;
+  readonly path: string;
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly inUse: boolean | null | undefined;
+  readonly reclaimable: boolean | null | undefined;
+  readonly reasons: string[];
+}
+
+export interface NapiMemoryCacheEntry {
+  readonly path: string;
+  readonly kind: "branch_memory" | "snapshot_memory";
+  readonly logicalBytes: bigint | null | undefined;
+  readonly allocatedBytes: bigint | null | undefined;
+  readonly state: "reclaimable" | "in_use" | "pending_handoff" | "too_young" |
+    "missing_handoff_lock" | "changed" | "removed" | "error";
+  readonly error: string | null | undefined;
+}
+
+export interface NapiMemoryCacheReport {
+  readonly dryRun: boolean;
+  readonly entries: NapiMemoryCacheEntry[];
+  readonly filesRemoved: number;
+  readonly logicalBytesRemoved: bigint;
+  readonly physicalBytesReclaimed: bigint | null | undefined;
+  readonly truncated: boolean;
 }

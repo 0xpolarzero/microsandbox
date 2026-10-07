@@ -62,7 +62,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
 //--------------------------------------------------------------------------------------------------
 
 /// Shared parsing vocabulary; restore applies its own resource authorization rules.
-trait ResourceBuilder: Sized {
+pub(crate) trait ResourceBuilder: Sized {
     fn volume(
         self,
         guest: impl Into<String>,
@@ -286,10 +286,10 @@ pub(crate) fn restore_builder_from_args(
             }
         });
     }
-    if let Some(seconds) = restore_duration(kwargs, "max_duration")? {
+    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
         builder = builder.max_duration(seconds);
     }
-    if let Some(seconds) = restore_duration(kwargs, "idle_timeout")? {
+    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
         builder = builder.idle_timeout(seconds);
     }
     let legacy_cow = extract_opt::<bool>(kwargs, "forked")?;
@@ -370,7 +370,7 @@ pub(crate) fn restore_builder_from_args(
 }
 
 /// Keep explicit zero, and reject non-finite or negative durations before native conversion.
-fn restore_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
+fn lifetime_duration(kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<Option<u64>> {
     extract_opt::<f64>(kwargs, name)?
         .map(|seconds| {
             if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
@@ -567,28 +567,18 @@ pub fn sandbox_builder_from_args(
         builder = builder.replace();
     }
     if let Some(timeout) = extract_opt::<f64>(kwargs, "replace_with_timeout")? {
-        if timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "replace_with_timeout must be non-negative",
-            ));
-        }
-        builder = builder.replace_with_timeout(std::time::Duration::from_secs_f64(timeout));
+        let duration = std::time::Duration::try_from_secs_f64(timeout).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(
+                "replace_with_timeout must be finite, non-negative, and fit in a duration",
+            )
+        })?;
+        builder = builder.replace_with_timeout(duration);
     }
-    if let Some(max_duration) = extract_opt::<f64>(kwargs, "max_duration")? {
-        if max_duration < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "max_duration must be non-negative",
-            ));
-        }
-        builder = builder.max_duration(max_duration as u64);
+    if let Some(seconds) = lifetime_duration(kwargs, "max_duration")? {
+        builder = builder.max_duration(seconds);
     }
-    if let Some(idle_timeout) = extract_opt::<f64>(kwargs, "idle_timeout")? {
-        if idle_timeout < 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "idle_timeout must be non-negative",
-            ));
-        }
-        builder = builder.idle_timeout(idle_timeout as u64);
+    if let Some(seconds) = lifetime_duration(kwargs, "idle_timeout")? {
+        builder = builder.idle_timeout(seconds);
     }
     if let Some(ephemeral) = extract_opt::<bool>(kwargs, "ephemeral")? {
         builder = builder.ephemeral(ephemeral);
@@ -1009,6 +999,51 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 //--------------------------------------------------------------------------------------------------
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
+
+/// Copy a fork's `Mapping[str, MountConfig]` into one owned dict per guest path.
+/// A local backend anchors relative `bind` and `disk` paths here, so later changes
+/// to the mapping or the working directory do not affect the fork.
+pub(crate) fn prepare_fork_volumes(
+    volumes: Option<&Bound<'_, PyAny>>,
+    local: bool,
+) -> PyResult<Vec<(String, Py<PyDict>)>> {
+    let Some(volumes) = volumes.filter(|volumes| !volumes.is_none()) else {
+        return Ok(Vec::new());
+    };
+    require_mapping_dict(volumes, "volumes")?
+        .iter()
+        .map(|(guest, mount)| {
+            let mount = config_dict(&mount, "MountConfig")?;
+            if local {
+                for key in ["bind", "disk"] {
+                    if let Some(path) = extract_opt::<String>(&mount, key)? {
+                        let path = std::path::absolute(path)?;
+                        let path = path.to_str().ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "cannot encode {key} host path as UTF-8"
+                            ))
+                        })?;
+                        mount.set_item(key, path)?;
+                    }
+                }
+            }
+            Ok((guest.extract()?, mount.unbind()))
+        })
+        .collect()
+}
+
+/// Apply the mounts from [`prepare_fork_volumes`] to a fork builder.
+pub(crate) fn apply_fork_volumes<B: ResourceBuilder>(
+    mut builder: B,
+    volumes: &[(String, Py<PyDict>)],
+) -> PyResult<B> {
+    Python::with_gil(|py| {
+        for (guest, mount) in volumes {
+            builder = apply_mount(builder, guest.clone(), mount.bind(py))?;
+        }
+        Ok(builder)
+    })
+}
 
 fn apply_mount<B: ResourceBuilder>(
     builder: B,
@@ -1474,11 +1509,7 @@ fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolic
                     Vec::new()
                 };
                 let ports = if let Some(port_val) = extract_opt::<String>(&rd, "port")? {
-                    if let Ok(p) = port_val.parse::<u16>() {
-                        vec![microsandbox_network::policy::PortRange { start: p, end: p }]
-                    } else {
-                        Vec::new()
-                    }
+                    vec![parse_policy_port(&port_val)?]
                 } else {
                     Vec::new()
                 };
@@ -1515,6 +1546,19 @@ fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolic
         return Ok(Some(policy));
     }
     Ok(None)
+}
+
+/// Reject malformed filters instead of turning them into unrestricted ports.
+fn parse_policy_port(value: &str) -> PyResult<microsandbox_network::policy::PortRange> {
+    let invalid =
+        || pyo3::exceptions::PyValueError::new_err(format!("invalid port or port range: {value}"));
+    let (start, end) = value.split_once('-').unwrap_or((value, value));
+    let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+    let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+    if start > end {
+        return Err(invalid());
+    }
+    Ok(microsandbox_network::policy::PortRange { start, end })
 }
 
 fn apply_network(
@@ -1898,16 +1942,17 @@ fn apply_secret(
     let require_tls: Option<bool> = extract_opt(secret, "require_tls_identity")?;
     let passthrough: Vec<String> = extract_opt(secret, "passthrough")?.unwrap_or_default();
 
-    let (substitute_headers, substitute_query, substitute_body) =
+    let (substitute_headers, substitute_header_fields, substitute_query, substitute_body) =
         if let Some(substitution_obj) = secret.get_item("substitution")? {
             let substitution: Bound<'_, PyDict> = substitution_obj.downcast::<PyDict>()?.clone();
             (
                 extract_opt::<bool>(&substitution, "headers")?,
+                extract_opt::<Vec<String>>(&substitution, "header_fields")?,
                 extract_opt::<bool>(&substitution, "query")?,
                 extract_opt::<bool>(&substitution, "body")?,
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
     Ok(builder.secret(|s| {
@@ -1931,6 +1976,12 @@ fn apply_secret(
         if let Some(req) = require_tls {
             s = s.require_tls_identity(req);
         }
+        if let Some(v) = substitute_header_fields {
+            s = s.substitute_in_header_fields(v);
+        }
+        // Apply the explicit enabled/disabled switch after the header list:
+        // `substitute_in_header_fields` enables header substitution, so a
+        // caller that sets `headers=false` must win regardless of ordering.
         if let Some(v) = substitute_headers {
             s = s.substitute_in_headers(v);
         }
@@ -2261,7 +2312,7 @@ fn parse_violation_action(
     }
 }
 
-fn parse_violation_action_obj(
+pub(crate) fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
     let s = extract_str_enum(obj, "ViolationAction")?;
@@ -2331,3 +2382,131 @@ macro_rules! resource_builder {
 }
 resource_builder!(SandboxBuilder);
 resource_builder!(microsandbox::sandbox::RestoreBuilder);
+resource_builder!(microsandbox::sandbox::ForkBuilder);
+resource_builder!(microsandbox::sandbox::ForkManyBuilder);
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::ffi::CString;
+
+    use super::*;
+
+    // Python imports can release the GIL while another test replaces sys.modules.
+    pub(crate) static PYTHON_TYPES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Load `microsandbox.types` without importing the native extension.
+    fn volumes(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+        let package = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+        let code = format!(
+            "import sys, types\n\
+             package = types.ModuleType('microsandbox')\n\
+             package.__path__ = [{package:?}]\n\
+             sys.modules['microsandbox'] = package\n\
+             from microsandbox.types import MountConfig, MountKind\n\
+             volumes = {{'/data': MountConfig(kind=MountKind.DISK, disk='./seed.img')}}\n"
+        );
+        let globals = PyDict::new(py);
+        py.run(&CString::new(code)?, Some(&globals), None)?;
+        Ok(globals.get_item("volumes")?.unwrap().downcast_into()?)
+    }
+
+    fn disk_of(py: Python<'_>, prepared: &[(String, Py<PyDict>)]) -> String {
+        prepared[0]
+            .1
+            .bind(py)
+            .get_item("disk")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap()
+    }
+
+    #[test]
+    fn fork_volumes_are_copied_and_anchored_for_a_local_backend() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mapping = volumes(py).unwrap();
+            let local = prepare_fork_volumes(Some(mapping.as_any()), true).unwrap();
+            let remote = prepare_fork_volumes(Some(mapping.as_any()), false).unwrap();
+            mapping.del_item("/data").unwrap();
+
+            let anchored = std::path::absolute("./seed.img").unwrap();
+            assert_eq!(local[0].0, "/data");
+            assert_eq!(disk_of(py, &local), anchored.to_string_lossy());
+            assert_eq!(disk_of(py, &remote), "./seed.img");
+        });
+    }
+
+    #[test]
+    fn policy_ports_preserve_ranges_and_reject_invalid_filters() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for (value, start, end) in [
+                ("443", 443, 443),
+                ("8000-9000", 8000, 9000),
+                ("0-65535", 0, 65535),
+            ] {
+                let network = PyDict::new(py);
+                let policy = PyDict::new(py);
+                let rule = PyDict::new(py);
+                rule.set_item("action", "allow").unwrap();
+                rule.set_item("port", value).unwrap();
+                policy.set_item("rules", vec![rule]).unwrap();
+                network.set_item("custom_policy", policy).unwrap();
+                let parsed = parse_network_policy(&network).unwrap().unwrap();
+                assert_eq!(parsed.rules[0].ports[0].start, start);
+                assert_eq!(parsed.rules[0].ports[0].end, end);
+            }
+            for value in ["", "typo", "65536", "-1", "1.5", "9000-8000", "1-2-3"] {
+                assert!(parse_policy_port(value).is_err(), "{value}");
+            }
+        });
+    }
+
+    #[test]
+    fn creation_rejects_invalid_time_limits_before_startup() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for name in ["replace_with_timeout", "max_duration", "idle_timeout"] {
+                for value in [f64::NAN, f64::INFINITY, -1.0, f64::MAX] {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("image", "alpine").unwrap();
+                    kwargs.set_item(name, value).unwrap();
+                    assert!(
+                        sandbox_builder_from_args("invalid-duration".into(), Some(&kwargs))
+                            .is_err()
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn creation_and_restore_lifetime_validation_rounds_up() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            for name in ["max_duration", "idle_timeout"] {
+                for (value, expected) in [(0.0, 0), (0.5, 1), (1.1, 2), (2.0, 2)] {
+                    kwargs.set_item(name, value).unwrap();
+                    assert_eq!(lifetime_duration(&kwargs, name).unwrap(), Some(expected));
+                }
+                for value in [
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    -1.0,
+                    u64::MAX as f64,
+                ] {
+                    kwargs.set_item(name, value).unwrap();
+                    assert!(lifetime_duration(&kwargs, name).is_err());
+                }
+            }
+        });
+    }
+}

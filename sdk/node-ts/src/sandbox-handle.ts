@@ -1,5 +1,7 @@
+import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
+import { forkMountBuilders } from "./internal/fork-volumes.js";
 import {
   compactionResultFromJson,
   type DiskCompactionOptions,
@@ -29,12 +31,14 @@ import {
 } from "./logs.js";
 import {
   Sandbox,
+  type ForkOptions,
   type SandboxPingResult,
   type SandboxTouchResult,
 } from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { Snapshot } from "./snapshot.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 
 export interface SandboxStopResult {
   readonly name: string;
@@ -82,6 +86,11 @@ export class SandboxHandle {
   async refresh(): Promise<SandboxHandle> {
     const raw = await withMappedErrors(() => this.inner.refresh());
     return new SandboxHandle(raw);
+  }
+
+  /** Observe the managed sandbox directory using this handle's captured backend. */
+  async storageUsage(): Promise<StorageItemUsage> {
+    return storageUsageFromHandle(this.inner, "SandboxHandle.storageUsage()");
   }
 
   /** Get point-in-time metrics. */
@@ -188,24 +197,30 @@ export class SandboxHandle {
   }
 
   /** @deprecated Use fork() for live execution duplication. */
-  async branch(name: string, options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<Sandbox> {
+  async branch(name: string, options: ForkOptions = {}): Promise<Sandbox> {
     return this.fork(name, options);
   }
 
   /** @deprecated Use forkMany() for capture-once live duplication. */
-  async branchMany(names: string[], options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
+  async branchMany(names: string[], options: ForkOptions = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
     return this.forkMany(names, options);
   }
 
   /** Create an independent local CoW child without a durable full snapshot. */
-  async fork(name: string, options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<Sandbox> {
-    const child = await withMappedErrors(() => this.inner.fork(name, options.recordIntegrity, options.guestFlush));
+  async fork(name: string, options: ForkOptions = {}): Promise<Sandbox> {
+    const volumes = forkMountBuilders(options.volumes);
+    const child = await withMappedErrors(() => this.inner.fork(
+      name, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return new Sandbox(child, name, false);
   }
 
   /** Capture once; return each named child's startup outcome in input order. */
-  async forkMany(names: string[], options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
-    const outcomes = await withMappedErrors(() => this.inner.forkMany(names, options.recordIntegrity, options.guestFlush));
+  async forkMany(names: string[], options: ForkOptions = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
+    const volumes = forkMountBuilders(options.volumes);
+    const outcomes = await withMappedErrors(() => this.inner.forkMany(
+      names, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return outcomes.map(o => o.sandbox
       ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
       : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });
@@ -344,18 +359,4 @@ function sandboxStopResultFromNapi(result: {
     observedAt: new Date(result.observedAt),
     source: result.source ?? null,
   };
-}
-
-function remapKeysToCamel(v: any): any {
-  if (Array.isArray(v)) return v.map(remapKeysToCamel);
-  if (v && typeof v === "object" && v.constructor === Object) {
-    const out: any = {};
-    for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeysToCamel(val);
-    return out;
-  }
-  return v;
-}
-
-function snakeToCamel(s: string): string {
-  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }

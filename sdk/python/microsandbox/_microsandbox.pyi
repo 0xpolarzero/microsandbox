@@ -443,20 +443,24 @@ class Sandbox:
     async def fork(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     # Deprecated: use fork.
     async def branch(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     async def fork_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> list[ForkOutcome]: ...
     # Deprecated: use fork_many.
     async def branch_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...
@@ -581,20 +585,24 @@ class SandboxHandle:
     async def fork(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     # Deprecated: use fork.
     async def branch(
         self, name: str, *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> Sandbox: ...
     async def fork_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> list[ForkOutcome]: ...
     # Deprecated: use fork_many.
     async def branch_many(
         self, names: list[str], *, record_integrity: bool = False,
         guest_flush: GuestFlush | None = None,
+        volumes: Mapping[str, MountConfig] | None = None,
     ) -> list[ForkOutcome]: ...
     async def pause(self, *, guest_flush: GuestFlush | None = None) -> None: ...
     async def resume(self) -> None: ...

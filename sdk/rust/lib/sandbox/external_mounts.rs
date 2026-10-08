@@ -17,7 +17,7 @@ use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
     db::entity::{sandbox, volume},
-    error::MISSING_RESTORE_BINDINGS,
+    error::RestoreKind,
     snapshot::Manifest,
 };
 
@@ -469,18 +469,18 @@ fn integrity(error: impl std::fmt::Display) -> MicrosandboxError {
 
 /// Keep the entire missing set actionable without disclosing source host paths.
 fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
-    MicrosandboxError::InvalidConfig(format!(
-        "{MISSING_RESTORE_BINDINGS} {}; provide a destination mount or select a captured disk for each path, or explicitly allow missing resources",
-        missing.into_iter().collect::<Vec<_>>().join(", ")
-    ))
+    MicrosandboxError::MissingRestoreBindings {
+        missing: missing.into_iter().collect(),
+        restore: RestoreKind::Full,
+    }
 }
 
 /// A disk restore maps host paths itself; captured disks cannot satisfy this check.
 fn missing_disk_mounts(missing: BTreeSet<String>) -> MicrosandboxError {
-    MicrosandboxError::InvalidConfig(format!(
-        "{MISSING_RESTORE_BINDINGS} {}; provide a destination mount for each path or explicitly allow missing resources",
-        missing.into_iter().collect::<Vec<_>>().join(", ")
-    ))
+    MicrosandboxError::MissingRestoreBindings {
+        missing: missing.into_iter().collect(),
+        restore: RestoreKind::Disk,
+    }
 }
 
 async fn backing_exists(path: &std::path::Path) -> MicrosandboxResult<bool> {
@@ -551,10 +551,14 @@ mod tests {
         };
         let unmapped = config(SandboxBuilder::new("restore"), true);
 
-        let error = require_guest_mounts(&unmapped, paths.clone())
-            .unwrap_err()
-            .to_string();
+        let refusal = require_guest_mounts(&unmapped, paths.clone()).unwrap_err();
+        let error = refusal.to_string();
+        let MicrosandboxError::MissingRestoreBindings { missing, restore } = refusal else {
+            panic!("an unmapped disk restore must report missing bindings");
+        };
 
+        assert_eq!(missing, ["mount /data"]);
+        assert_eq!(restore, RestoreKind::Disk);
         assert!(error.contains("restore requires destination bindings for: mount /data;"));
         assert!(error.contains("provide a destination mount for each path"));
         assert!(error.contains("explicitly allow missing resources"));
@@ -566,7 +570,14 @@ mod tests {
             true,
         );
 
-        assert!(require_guest_mounts(&tmpfs, paths.clone()).is_err());
+        let Err(MicrosandboxError::MissingRestoreBindings { missing, restore }) =
+            require_guest_mounts(&tmpfs, paths.clone())
+        else {
+            panic!("a tmpfs is not a host binding");
+        };
+
+        assert_eq!(missing, ["mount /data"]);
+        assert_eq!(restore, RestoreKind::Disk);
 
         let mapped = config(
             SandboxBuilder::new("restore").volume("/data/", |m| m.bind("/tmp/d")),

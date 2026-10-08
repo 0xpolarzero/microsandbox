@@ -2442,12 +2442,12 @@ mod tests {
         BackendConfig, SandboxBuilder, SandboxConfigPatch, apply_checkpoint_resources,
         checkpoint_network_override_conflicts,
     };
-    use crate::LogLevel;
     use crate::config::GlobalConfigPatch;
     use crate::sandbox::config::RestoreOverrideIntent;
     #[cfg(feature = "local")]
     use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
+    use crate::{LogLevel, MicrosandboxError, RestoreKind};
     use std::collections::BTreeMap;
 
     #[cfg(feature = "net")]
@@ -4026,11 +4026,21 @@ mod tests {
             config.restore_resources.require_complete = complete;
             config
         };
+        let refused = |config: &crate::SandboxConfig, manifest: &_| {
+            let Err(MicrosandboxError::MissingRestoreBindings { missing, restore }) =
+                require_recorded_mounts(config, manifest)
+            else {
+                panic!("the restore must be refused");
+            };
+            (missing, restore)
+        };
 
-        let error =
-            require_recorded_mounts(&config(SandboxBuilder::new("restore"), true), &manifest)
-                .unwrap_err()
-                .to_string();
+        let (missing, restore) = refused(&config(SandboxBuilder::new("restore"), true), &manifest);
+
+        assert_eq!(missing, ["mount /data", "mount /logs"]);
+        assert_eq!(restore, RestoreKind::Disk);
+
+        let error = MicrosandboxError::MissingRestoreBindings { missing, restore }.to_string();
 
         assert!(
             error.contains("restore requires destination bindings for: mount /data, mount /logs")
@@ -4039,22 +4049,20 @@ mod tests {
 
         let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));
 
-        let error = require_recorded_mounts(&config(partial, true), &manifest)
-            .unwrap_err()
-            .to_string();
+        let (missing, restore) = refused(&config(partial, true), &manifest);
 
-        assert!(error.contains("mount /logs") && !error.contains("mount /data"));
+        assert_eq!(missing, ["mount /logs"]);
+        assert_eq!(restore, RestoreKind::Disk);
 
         // A tmpfs at a recorded path is not a host binding: still refused.
         let tmpfs = SandboxBuilder::new("restore")
             .volume("/data", |m| m.tmpfs())
             .volume("/logs", |m| m.named("logs"));
 
-        let error = require_recorded_mounts(&config(tmpfs, true), &manifest)
-            .unwrap_err()
-            .to_string();
+        let (missing, restore) = refused(&config(tmpfs, true), &manifest);
 
-        assert!(error.contains("mount /data") && !error.contains("mount /logs"));
+        assert_eq!(missing, ["mount /data"]);
+        assert_eq!(restore, RestoreKind::Disk);
 
         let full = SandboxBuilder::new("restore")
             .volume("/data/", |m| m.bind("/tmp/data"))

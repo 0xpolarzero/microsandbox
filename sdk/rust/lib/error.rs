@@ -5,13 +5,6 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 //--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Leading text of the restore refusal that lists guest paths without destination bindings.
-pub(crate) const MISSING_RESTORE_BINDINGS: &str = "restore requires destination bindings for:";
-
-//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -108,6 +101,23 @@ pub enum MicrosandboxError {
     /// Invalid configuration.
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+
+    /// A restore was refused because guest paths lack destination bindings.
+    ///
+    /// Callers can branch on `restore` to offer interface-specific remedies, such as selecting a
+    /// captured disk, which only a full restore accepts.
+    #[error(
+        "invalid config: restore requires destination bindings for: {}; {}",
+        .missing.join(", "),
+        .restore.missing_bindings_remedy()
+    )]
+    MissingRestoreBindings {
+        /// Sorted resources without a destination, each a kind and guest path such as
+        /// `mount /data`, `disk /data`, or `filesystem /work`.
+        missing: Vec<String>,
+        /// Which restore refused, which decides how the missing resources can be supplied.
+        restore: RestoreKind,
+    },
 
     /// The sandbox's effective entrypoint and CMD do not provide an executable default command.
     #[error(
@@ -366,6 +376,15 @@ pub enum MicrosandboxError {
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+/// Which restore operation reported missing destination bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreKind {
+    /// A disk restore; only destination mounts can satisfy its recorded guest paths.
+    Disk,
+    /// A full restore; destination mounts or its captured disks can satisfy missing resources.
+    Full,
 }
 
 /// An SDK operation that a backend may decline to perform.
@@ -666,13 +685,20 @@ impl MicrosandboxError {
     pub fn cloud_only(op: Operation) -> MicrosandboxError {
         Self::unsupported(op, UnsupportedReason::CloudOnly)
     }
+}
 
-    /// Whether a restore was refused because guest paths lack destination bindings.
-    ///
-    /// Callers can use this to add interface-specific guidance, such as how to supply the
-    /// missing mounts or allow missing resources.
-    pub fn is_missing_restore_bindings(&self) -> bool {
-        matches!(self, Self::InvalidConfig(message) if message.starts_with(MISSING_RESTORE_BINDINGS))
+impl RestoreKind {
+    /// Interface-neutral remedy for resources this restore is missing.
+    fn missing_bindings_remedy(self) -> &'static str {
+        match self {
+            RestoreKind::Disk => {
+                "provide a destination mount for each path or explicitly allow missing resources"
+            }
+            RestoreKind::Full => {
+                "provide a destination mount or select a \
+                 captured disk for each path, or explicitly allow missing resources"
+            }
+        }
     }
 }
 
@@ -748,16 +774,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_restore_bindings_are_recognized_only_by_their_refusal() {
-        let refusal = MicrosandboxError::InvalidConfig(format!(
-            "{MISSING_RESTORE_BINDINGS} mount /data; provide a destination mount"
-        ));
-        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
-        let custom = MicrosandboxError::Custom(format!("{MISSING_RESTORE_BINDINGS} mount /data"));
+    fn missing_restore_bindings_name_each_restore_remedy() {
+        let disk = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into(), "mount /logs".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
 
-        assert!(refusal.is_missing_restore_bindings());
-        assert!(!other.is_missing_restore_bindings());
-        assert!(!custom.is_missing_restore_bindings());
+        assert_eq!(
+            disk.to_string(),
+            "invalid config: restore requires destination bindings for: mount /data, \
+             mount /logs; provide a destination mount for each path or explicitly allow \
+             missing resources"
+        );
+        assert_eq!(
+            full.to_string(),
+            "invalid config: restore requires destination bindings for: disk /data, \
+             filesystem /work; provide a destination mount or select a captured disk for \
+             each path, or explicitly allow missing resources"
+        );
     }
 
     #[test]

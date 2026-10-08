@@ -2,7 +2,7 @@
 
 use clap::Args;
 use microsandbox::{
-    MicrosandboxError,
+    MicrosandboxError, RestoreKind,
     sandbox::{
         ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
     },
@@ -259,18 +259,13 @@ pub async fn run(
 
 /// CLI guidance for a restore refused because guest paths lack destination bindings.
 fn missing_bindings_hints(error: &MicrosandboxError) -> Option<Vec<&'static str>> {
-    if !error.is_missing_restore_bindings() {
+    let MicrosandboxError::MissingRestoreBindings { restore, .. } = error else {
         return None;
-    }
+    };
 
     let mut hints = vec!["map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST"];
     // Only a full restore can select disks it captured; a disk restore never offers that.
-    // Read the remediation after the last `; ` so guest paths cannot change the hint.
-    let message = error.to_string();
-    let remediation = message
-        .rsplit_once("; ")
-        .map_or("", |(_, remediation)| remediation);
-    if remediation.contains("captured disk") {
+    if *restore == RestoreKind::Full {
         hints.push("select a captured disk with -v GUEST");
     }
     hints.push("or pass --allow-missing-resources to start without them");
@@ -359,12 +354,14 @@ mod tests {
 
     #[test]
     fn missing_bindings_refusal_gets_flag_hints() {
-        let disk_refusal = MicrosandboxError::InvalidConfig(
-            "restore requires destination bindings for: mount /data; provide a destination mount for each path or explicitly allow missing resources".into(),
-        );
-        let full_refusal = MicrosandboxError::InvalidConfig(
-            "restore requires destination bindings for: disk /data, filesystem /work; provide a destination mount or select a captured disk for each path, or explicitly allow missing resources".into(),
-        );
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
         let other = MicrosandboxError::InvalidConfig("invalid volume".into());
 
         let disk_hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
@@ -382,9 +379,10 @@ mod tests {
 
     #[test]
     fn missing_bindings_hint_ignores_guest_paths() {
-        let disk_refusal = MicrosandboxError::InvalidConfig(
-            "restore requires destination bindings for: mount /captured disk; provide a destination mount for each path or explicitly allow missing resources".into(),
-        );
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /captured disk".into()],
+            restore: RestoreKind::Disk,
+        };
 
         let hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
 

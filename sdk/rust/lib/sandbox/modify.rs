@@ -3,7 +3,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use microsandbox_types::{
-    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction, VolumeMount,
+    EnvVar, HostPermissions, MountOptions, OwnedVolumeStorage, RootDisk, RootfsSource,
+    SecretSubstitution, SecretViolationAction, StatVirtualization, VolumeMount,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
@@ -2525,21 +2526,145 @@ fn mount_json(mount: &VolumeMount) -> Option<serde_json::Value> {
     serde_json::to_value(mount).ok()
 }
 
+/// Render a mount on one line with every setting it is compared by, so a replacement
+/// that changes any option shows different before and after text. Access and disk
+/// format are always shown; other settings only when they differ from their default.
 fn format_mount(mount: &VolumeMount) -> String {
-    let (source, options) = match mount {
-        VolumeMount::Bind { host, options, .. } => (format!("bind {}", host.display()), options),
-        VolumeMount::Named { name, options, .. } => (format!("named {name}"), options),
-        VolumeMount::DiskImage { host, options, .. } => {
-            (format!("disk {}", host.display()), options)
+    let (source, settings) = match mount {
+        VolumeMount::Bind {
+            host,
+            options,
+            stat_virtualization,
+            host_permissions,
+            follow_root_symlinks,
+            quota_mib,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                *follow_root_symlinks,
+            );
+            if let Some(quota_mib) = quota_mib {
+                settings.push(format!("quota={quota_mib}MiB"));
+            }
+            (format!("bind {}", host.display()), settings)
         }
-        VolumeMount::Tmpfs { options, .. } => ("tmpfs".to_string(), options),
-        VolumeMount::Owned { options, .. } => ("owned".to_string(), options),
+        VolumeMount::Named {
+            name,
+            options,
+            stat_virtualization,
+            host_permissions,
+            follow_root_symlinks,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                *follow_root_symlinks,
+            );
+            (format!("named {name}"), settings)
+        }
+        VolumeMount::DiskImage {
+            host,
+            format,
+            fstype,
+            options,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            settings.push(format!("format={}", format.as_str()));
+            if let Some(fstype) = fstype {
+                settings.push(format!("fstype={fstype}"));
+            }
+            (format!("disk {}", host.display()), settings)
+        }
+        VolumeMount::Tmpfs {
+            size_mib, options, ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            if let Some(size_mib) = size_mib {
+                settings.push(format!("size={size_mib}MiB"));
+            }
+            ("tmpfs".to_string(), settings)
+        }
+        VolumeMount::Owned {
+            storage,
+            options,
+            stat_virtualization,
+            host_permissions,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                false,
+            );
+            match storage {
+                OwnedVolumeStorage::Directory { quota_mib } => {
+                    if let Some(quota_mib) = quota_mib {
+                        settings.push(format!("quota={quota_mib}MiB"));
+                    }
+                    ("owned directory".to_string(), settings)
+                }
+                OwnedVolumeStorage::Disk { capacity_mib } => {
+                    settings.push(format!("capacity={capacity_mib}MiB"));
+                    ("owned disk".to_string(), settings)
+                }
+            }
+        }
     };
-    format!(
-        "{}: {source} ({})",
-        mount.guest(),
-        if options.readonly { "ro" } else { "rw" }
-    )
+
+    format!("{}: {source} ({})", mount.guest(), settings.join(","))
+}
+
+/// Access and ownership settings every mount kind carries, in mount option spelling.
+fn mount_option_settings(options: &MountOptions) -> Vec<String> {
+    let access = if options.readonly { "ro" } else { "rw" };
+    let mut settings = vec![access.to_string()];
+
+    if options.noexec {
+        settings.push("noexec".to_string());
+    }
+    if options.nosuid {
+        settings.push("nosuid".to_string());
+    }
+    if options.nodev {
+        settings.push("nodev".to_string());
+    }
+    if let Some(uid) = options.override_uid {
+        settings.push(format!("uid={uid}"));
+    }
+    if let Some(gid) = options.override_gid {
+        settings.push(format!("gid={gid}"));
+    }
+    settings
+}
+
+/// Append the directory-backed policy settings that differ from their defaults.
+fn push_policy_settings(
+    settings: &mut Vec<String>,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+    follow_root_symlinks: bool,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => settings.push("stat-virt=relaxed".to_string()),
+        StatVirtualization::Off => settings.push("stat-virt=off".to_string()),
+    }
+    if host_permissions == HostPermissions::Mirror {
+        settings.push("host-perms=mirror".to_string());
+    }
+    if follow_root_symlinks {
+        settings.push("follow-root-symlinks".to_string());
+    }
 }
 
 fn push_mount_changes(
@@ -3302,6 +3427,7 @@ mod tests {
     #[cfg(unix)]
     use std::path::Path;
 
+    use microsandbox_types::DiskImageFormat;
     use sea_orm::ActiveModelTrait;
     use tempfile::tempdir;
 
@@ -5047,6 +5173,88 @@ mod tests {
                     && policy == ModificationPolicy::NoRestart
             );
         }
+    }
+
+    #[test]
+    fn mount_plans_show_every_changed_option() {
+        let bind = || MountBuilder::new("/data").bind("/host/data");
+        let tmpfs = || MountBuilder::new("/scratch").tmpfs();
+        let disk = || {
+            MountBuilder::new("/disk")
+                .disk("/host/data.img")
+                .format(DiskImageFormat::Raw)
+        };
+        let config = config_with_mounts(vec![
+            bind().build().unwrap(),
+            tmpfs().build().unwrap(),
+            disk().build().unwrap(),
+        ]);
+        let replacements = [
+            bind().noexec(),
+            bind().nosuid(),
+            bind().nodev(),
+            bind().owner(1000, 1000),
+            bind().quota(64),
+            bind().stat_virtualization(StatVirtualization::Relaxed),
+            bind().host_permissions(HostPermissions::Mirror),
+            bind().follow_root_symlinks(true),
+            tmpfs().size(64),
+            disk().format(DiskImageFormat::Qcow2),
+            disk().fstype("ext4"),
+        ];
+
+        for replacement in replacements {
+            let replacement = replacement.build().unwrap();
+            let rendered = format_mount(&replacement);
+            let patch = SandboxModificationPatch {
+                mounts: vec![replacement],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert!(
+                plan.conflicts.is_empty(),
+                "{rendered}: {:?}",
+                plan.conflicts
+            );
+            let [PlannedChange::Config(change)] = plan.changes.as_slice() else {
+                panic!("{rendered}: expected one config change");
+            };
+            assert_eq!(change.change, ChangeKind::Updated, "{rendered}");
+            assert_ne!(change.before, change.after, "{rendered}");
+        }
+    }
+
+    #[test]
+    fn mount_plans_render_every_setting_on_one_line() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .readonly()
+            .noexec()
+            .nosuid()
+            .nodev()
+            .owner(1000, 1001)
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .host_permissions(HostPermissions::Mirror)
+            .follow_root_symlinks(true)
+            .quota(64)
+            .build()
+            .unwrap();
+
+        let rendered = format_mount(&mount);
+        let plain = format_mount(&bind_mount("/data", "/host/data", false));
+
+        assert_eq!(
+            rendered,
+            "/data: bind /host/data (ro,noexec,nosuid,nodev,uid=1000,gid=1001,stat-virt=relaxed,host-perms=mirror,follow-root-symlinks,quota=64MiB)"
+        );
+        assert_eq!(plain, "/data: bind /host/data (rw)");
     }
 
     #[test]

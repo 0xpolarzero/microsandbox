@@ -1,3 +1,5 @@
+mod jobs;
+
 use std::{
     ffi::c_void,
     future::Future,
@@ -787,6 +789,7 @@ fn apply_builder_options(
         "root_disk",
         "disable_network",
         "http",
+        "intercept_tls",
         "network",
         "proxy",
         "secrets",
@@ -875,6 +878,9 @@ fn apply_builder_options(
         if let Some(message) = keyword::<String>(http, "deny_message")? {
             builder = builder.network(|network| network.http(|h| h.deny_message(message)));
         }
+    }
+    if keyword::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
+        builder = builder.intercept_tls();
     }
     if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
         builder = apply_outbound_proxy(builder, &proxy);
@@ -1138,6 +1144,10 @@ impl RubySandboxBuilder {
     fn root_disk(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.root_disk(v))
     }
+    fn intercept_tls(this: typed_data::Obj<Self>) -> Result<(), Error> {
+        put_builder(&this, SandboxBuilder::intercept_tls)
+    }
+
     fn disable_network(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::disable_network)
     }
@@ -2801,6 +2811,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     builder.define_method("root_disk!", method!(RubySandboxBuilder::root_disk, 1))?;
     builder.define_method(
+        "intercept_tls!",
+        method!(RubySandboxBuilder::intercept_tls, 0),
+    )?;
+    builder.define_method(
         "disable_network!",
         method!(RubySandboxBuilder::disable_network, 0),
     )?;
@@ -2913,6 +2927,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
     snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
 
+    jobs::init(ruby, module)?;
     Ok(())
 }
 

@@ -224,6 +224,8 @@ export interface NapiSandboxBuilderSetters {
   user(user: string): this;
   pullPolicy(policy: string): this;
   disableNetwork(): this;
+  /** Enable TLS interception, preserving existing network and TLS settings. */
+  interceptTls(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
   proxy(
@@ -324,6 +326,10 @@ export interface NapiSandboxDestroyOptions {
 }
 
 export interface NapiSandbox {
+  execDetached(cmd: string, args?: string[]): Promise<NapiJob>;
+  execDetachedWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiJob>;
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
   readonly backendKind: "local" | "cloud";
   readonly id: string;
   readonly ownsLifecycle: boolean;
@@ -378,6 +384,8 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
   storageUsage?(): Promise<NapiStorageItemUsage>;
   readonly id: string;
   readonly name: string;
@@ -1416,6 +1424,27 @@ export interface NapiRootDiskBuilder {
   cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
 }
 
+export interface NapiJob {
+  readonly id: string;
+  inspect(): Promise<string>;
+  wait(): Promise<string>;
+  signal(signal: number): Promise<void>;
+  kill(): Promise<void>;
+  eof(): Promise<void>;
+  logs(options: string): Promise<string>;
+  logStream(options: string): Promise<NapiJobLogStream>;
+  attach(readOnly: boolean, replayBytes?: number, cursor?: string): Promise<NapiJobAttachment>;
+}
+export interface NapiJobAttachment {
+  recv(): Promise<string | null>;
+  writeStdin(data: Buffer): Promise<void>;
+  resize(rows: number, cols: number): Promise<void>;
+  detach(): Promise<void>;
+}
+export interface NapiJobLogStream {
+  next(): Promise<string | null>;
+  close(): Promise<void>;
+}
 
 export interface NapiStorageUsage {
   readonly images: NapiStorageCategoryUsage;

@@ -1234,15 +1234,17 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             }
             #[cfg(windows)]
             remove_private_stage_leases(child_stage).await?;
+
+            let required_bind_paths =
+                crate::sandbox::external_bind_guest_paths(&checkpoint.resources)?;
+
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
                 disk_mounts: materialized.disk_mounts,
-                required_bind_paths: crate::sandbox::external_bind_guest_paths(
-                    &checkpoint.resources,
-                )?,
+                required_bind_paths,
             });
         }
         let child_closure = child_stage.join(".checkpoint-restore");

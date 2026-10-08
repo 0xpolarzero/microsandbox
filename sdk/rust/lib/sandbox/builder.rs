@@ -2071,10 +2071,10 @@ pub(crate) fn prepare_local_snapshot_restore(
             if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
                 // A disk-only restore does not reconnect captured external binds; require
                 // destination mounts up front.
-                crate::sandbox::require_guest_mounts(
-                    config,
-                    crate::sandbox::external_bind_guest_paths(&opened.resources)?,
-                )?;
+                let required_bind_paths =
+                    crate::sandbox::external_bind_guest_paths(&opened.resources)?;
+
+                crate::sandbox::require_guest_mounts(config, required_bind_paths)?;
             }
             if config.snapshot_restore_mode == SnapshotRestoreMode::Full {
                 if opened.architecture != std::env::consts::ARCH {
@@ -2445,6 +2445,8 @@ mod tests {
     use crate::LogLevel;
     use crate::config::GlobalConfigPatch;
     use crate::sandbox::config::RestoreOverrideIntent;
+    #[cfg(feature = "local")]
+    use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     use std::collections::BTreeMap;
 
@@ -4015,7 +4017,7 @@ mod tests {
     #[cfg(feature = "local")]
     #[test]
     fn disk_restore_requires_a_destination_for_each_recorded_mount() {
-        let mut manifest = manifest_with_guest_clock(super::super::GuestClockPolicy::Sync);
+        let mut manifest = manifest_with_guest_clock(GuestClockPolicy::Sync);
         manifest
             .set_external_mounts(vec!["/data".into(), "/logs".into()])
             .unwrap();
@@ -4025,52 +4027,46 @@ mod tests {
             config
         };
 
-        // Unbound: refused, naming every missing path.
-        let error = super::super::require_recorded_mounts(
-            &config(SandboxBuilder::new("restore"), true),
-            &manifest,
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            require_recorded_mounts(&config(SandboxBuilder::new("restore"), true), &manifest)
+                .unwrap_err()
+                .to_string();
+
         assert!(
             error.contains("restore requires destination bindings for: mount /data, mount /logs")
         );
         assert!(!error.contains("select captured disks"));
 
-        // A mapping for only one path still refuses for the other.
         let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));
-        let error = super::super::require_recorded_mounts(&config(partial, true), &manifest)
+
+        let error = require_recorded_mounts(&config(partial, true), &manifest)
             .unwrap_err()
             .to_string();
+
         assert!(error.contains("mount /logs") && !error.contains("mount /data"));
 
         // A tmpfs at a recorded path is not a host binding: still refused.
         let tmpfs = SandboxBuilder::new("restore")
             .volume("/data", |m| m.tmpfs())
             .volume("/logs", |m| m.named("logs"));
-        let error = super::super::require_recorded_mounts(&config(tmpfs, true), &manifest)
+
+        let error = require_recorded_mounts(&config(tmpfs, true), &manifest)
             .unwrap_err()
             .to_string();
+
         assert!(error.contains("mount /data") && !error.contains("mount /logs"));
 
-        // Every path mapped, or the explicit opt-out (require_complete cleared): accepted.
         let full = SandboxBuilder::new("restore")
             .volume("/data/", |m| m.bind("/tmp/data"))
             .volume("/logs", |m| m.named("logs"));
-        super::super::require_recorded_mounts(&config(full, true), &manifest).unwrap();
-        super::super::require_recorded_mounts(
-            &config(SandboxBuilder::new("restore"), false),
-            &manifest,
-        )
-        .unwrap();
+
+        require_recorded_mounts(&config(full, true), &manifest).unwrap();
+        require_recorded_mounts(&config(SandboxBuilder::new("restore"), false), &manifest).unwrap();
 
         // Snapshots without the extension (older or no external mounts) are unaffected.
-        let plain = manifest_with_guest_clock(super::super::GuestClockPolicy::Sync);
-        super::super::require_recorded_mounts(
-            &config(SandboxBuilder::new("restore"), true),
-            &plain,
-        )
-        .unwrap();
+        let plain = manifest_with_guest_clock(GuestClockPolicy::Sync);
+
+        require_recorded_mounts(&config(SandboxBuilder::new("restore"), true), &plain).unwrap();
     }
 
     #[test]

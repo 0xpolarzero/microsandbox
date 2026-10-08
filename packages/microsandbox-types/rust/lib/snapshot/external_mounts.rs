@@ -35,15 +35,17 @@ impl Manifest {
     ) -> SnapshotManifestResult<()> {
         guest_paths.sort();
         guest_paths.dedup();
+
         if guest_paths.is_empty() {
             self.extensions.remove(EXTERNAL_MOUNTS_EXTENSION);
             return Ok(());
         }
-        self.extensions.insert(
-            EXTERNAL_MOUNTS_EXTENSION.into(),
-            serde_json::to_value(ExternalMountsExtension { guest_paths })
-                .map_err(|error| SnapshotManifestError::ManifestParse(error.to_string()))?,
-        );
+
+        let value = serde_json::to_value(ExternalMountsExtension { guest_paths })
+            .map_err(|error| SnapshotManifestError::ManifestParse(error.to_string()))?;
+        self.extensions
+            .insert(EXTERNAL_MOUNTS_EXTENSION.into(), value);
+
         Ok(())
     }
 
@@ -52,10 +54,12 @@ impl Manifest {
         let Some(value) = self.extensions.get(EXTERNAL_MOUNTS_EXTENSION) else {
             return Ok(Vec::new());
         };
+
         let extension: ExternalMountsExtension =
             serde_json::from_value(value.clone()).map_err(|error| {
                 SnapshotManifestError::ManifestParse(format!("invalid external mounts: {error}"))
             })?;
+
         Ok(extension.guest_paths)
     }
 }

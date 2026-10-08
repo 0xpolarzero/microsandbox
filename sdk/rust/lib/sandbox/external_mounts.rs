@@ -536,7 +536,9 @@ mod tests {
             resource("external_bind", "/data"),
             resource("owned_directory", "/own"),
         ];
+
         let paths = external_bind_guest_paths(&resources).unwrap();
+
         assert_eq!(paths, ["/data"]);
 
         let config = |builder: SandboxBuilder, complete: bool| {
@@ -545,9 +547,11 @@ mod tests {
             config
         };
         let unmapped = config(SandboxBuilder::new("restore"), true);
+
         let error = require_guest_mounts(&unmapped, paths.clone())
             .unwrap_err()
             .to_string();
+
         assert!(error.contains("restore requires destination bindings for: mount /data;"));
         assert!(error.contains("provide a destination mount for each path"));
         assert!(error.contains("explicitly allow missing resources"));
@@ -558,14 +562,16 @@ mod tests {
             SandboxBuilder::new("restore").volume("/data", |m| m.tmpfs()),
             true,
         );
+
         assert!(require_guest_mounts(&tmpfs, paths.clone()).is_err());
 
         let mapped = config(
             SandboxBuilder::new("restore").volume("/data/", |m| m.bind("/tmp/d")),
             true,
         );
-        require_guest_mounts(&mapped, paths.clone()).unwrap();
         let opted_out = config(SandboxBuilder::new("restore"), false);
+
+        require_guest_mounts(&mapped, paths.clone()).unwrap();
         require_guest_mounts(&opted_out, paths).unwrap();
     }
 

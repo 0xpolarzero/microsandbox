@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use microsandbox::sandbox::VolumeMount;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
@@ -10,8 +11,9 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
-    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_mount_patches,
+    parse_violation_action_obj, prepare_fork_volumes, restore_builder_from_args,
+    sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -1001,7 +1003,7 @@ impl PySandbox {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
-        let mounts = crate::helpers::parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
+        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
         let patch = build_modify_patch(
             cpus,
             max_cpus,
@@ -1535,7 +1537,7 @@ pub(crate) fn build_modify_patch(
     workdir: Option<String>,
     secrets: Vec<microsandbox::sandbox::SecretModificationPatch>,
     secrets_rm: Option<Vec<String>>,
-    mounts: Vec<microsandbox::sandbox::VolumeMount>,
+    mounts: Vec<VolumeMount>,
     mounts_rm: Option<Vec<String>>,
 ) -> microsandbox::sandbox::SandboxModificationPatch {
     let mut env_pairs: Vec<_> = env.unwrap_or_default().into_iter().collect();
@@ -2700,7 +2702,7 @@ pub fn optional_duration(value: Option<f64>) -> PyResult<Option<std::time::Durat
 
 #[cfg(test)]
 mod tests {
-    use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
+    use microsandbox::sandbox::{MountBuilder, SecretModificationPatch, SecretSource};
 
     use super::*;
 
@@ -2835,7 +2837,7 @@ mod tests {
             ],
             Some(vec!["OLD".to_string()]),
             vec![
-                microsandbox::sandbox::MountBuilder::new("/data")
+                MountBuilder::new("/data")
                     .bind("/srv/data")
                     .readonly()
                     .build()

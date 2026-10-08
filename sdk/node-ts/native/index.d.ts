@@ -2571,7 +2571,9 @@ export interface SandboxModifyOptions {
   workdir?: string
   secrets?: Record<string, SecretModifySpec>
   secretsRemove?: Array<string>
+  /** Mounts to add; each replaces any mount already at its guest path. */
   mounts?: Array<VolumeMount>
+  /** Guest paths of the mounts to remove. */
   mountsRemove?: Array<string>
   policy?: string
   dryRun?: boolean

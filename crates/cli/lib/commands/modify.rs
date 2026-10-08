@@ -270,9 +270,11 @@ fn apply_mount_args(
         let (_, mount) = common::volume_mount(entry)?;
         builder = builder.mount(mount.build()?);
     }
+
     for guest in &args.volume_remove {
         builder = builder.remove_mount(guest);
     }
+
     Ok(builder)
 }
 
@@ -794,6 +796,7 @@ impl BlockerLine {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use microsandbox::sandbox::VolumeMount;
     use microsandbox_types::{NamedVolumeMode, VolumeKind};
 
     use super::*;
@@ -933,10 +936,12 @@ mod tests {
 
         let (guest, mount) =
             common::volume_mount(&format!("{}:/opt/apps:ro", dir.display())).unwrap();
+        let mount = mount.build().unwrap();
+
         assert_eq!(guest, "/opt/apps");
         assert!(matches!(
-            mount.build().unwrap(),
-            microsandbox::sandbox::VolumeMount::Bind { host, options, .. }
+            mount,
+            VolumeMount::Bind { host, options, .. }
                 if host == dir && options.readonly
         ));
     }

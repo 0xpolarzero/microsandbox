@@ -678,6 +678,7 @@ mod tests {
             .iter()
             .map(|m| &m["guest"])
             .collect();
+
         assert_eq!(guests, ["/code", "/data", "/disk", "/scratch"]);
         assert_eq!(json[0]["type"], "Bind");
         assert_eq!(json[0]["host"], "/srv/code");
@@ -698,6 +699,7 @@ mod tests {
         with_sdk_types(|py| {
             let mounts = PyDict::new(py);
             mounts.set_item("/scratch", PyDict::new(py))?;
+
             assert!(parse_mount_patches(Some(mounts.as_any())).is_err());
             Ok(())
         });

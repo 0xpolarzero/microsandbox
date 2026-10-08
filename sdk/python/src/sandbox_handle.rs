@@ -4,7 +4,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
 use crate::error::to_py_err;
-use crate::helpers::{apply_fork_volumes, extract_str_enum, prepare_fork_volumes, str_enum_member};
+use crate::helpers::{
+    apply_fork_volumes, extract_str_enum, parse_mount_patches, prepare_fork_volumes,
+    str_enum_member,
+};
 use crate::metrics::convert_metrics;
 use crate::sandbox::{
     PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
@@ -258,7 +261,7 @@ impl PySandboxHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
-        let mounts = crate::helpers::parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
+        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
         let patch = crate::sandbox::build_modify_patch(
             cpus,
             max_cpus,

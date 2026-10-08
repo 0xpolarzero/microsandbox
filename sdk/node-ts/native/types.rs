@@ -53,7 +53,9 @@ pub struct SandboxModifyOptions {
     pub workdir: Option<String>,
     pub secrets: Option<HashMap<String, SecretModifySpec>>,
     pub secrets_remove: Option<Vec<String>>,
+    /// Mounts to add; each replaces any mount already at its guest path.
     pub mounts: Option<Vec<JsBuiltVolumeMount>>,
+    /// Guest paths of the mounts to remove.
     pub mounts_remove: Option<Vec<String>>,
     pub policy: Option<String>,
     pub dry_run: Option<bool>,

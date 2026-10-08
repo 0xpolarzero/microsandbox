@@ -1,8 +1,8 @@
 use microsandbox::sandbox::{
-    CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
-    SecretSource, SecurityProfile, TransparentHugePagePolicy,
+    CpuPlacement, DeploymentProfile, MountBuilder, NetworkPolicy, Patch, PullPolicy,
+    SandboxBuilder, SecretSource, SecurityProfile, TransparentHugePagePolicy, VolumeMount,
 };
-use microsandbox::{LogLevel, RegistryAuth, SnapshotReference};
+use microsandbox::{LogLevel, MicrosandboxError, RegistryAuth, SnapshotReference};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
@@ -67,9 +67,7 @@ pub(crate) trait VolumeBuilder: Sized {
     fn volume(
         self,
         guest: impl Into<String>,
-        configure: impl FnOnce(
-            microsandbox::sandbox::MountBuilder,
-        ) -> microsandbox::sandbox::MountBuilder,
+        configure: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self;
 }
 
@@ -97,6 +95,13 @@ struct RootDiskSpec {
     format: Option<microsandbox::sandbox::DiskImageFormat>,
     fstype: Option<String>,
     clone: Option<microsandbox::sandbox::FlatClone>,
+}
+
+/// Collects built mounts for a modification patch.
+#[derive(Default)]
+struct MountPatchBuilder {
+    mounts: Vec<VolumeMount>,
+    error: Option<MicrosandboxError>,
 }
 
 /// Identifies whether port entries came directly from the public kwarg or
@@ -140,6 +145,27 @@ impl RootDiskSpec {
             }
             d
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl VolumeBuilder for MountPatchBuilder {
+    fn volume(
+        mut self,
+        guest: impl Into<String>,
+        configure: impl FnOnce(MountBuilder) -> MountBuilder,
+    ) -> Self {
+        match configure(MountBuilder::new(guest)).build() {
+            Ok(mount) => self.mounts.push(mount),
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+
+        self
     }
 }
 
@@ -1010,39 +1036,13 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
 
-/// Collects built mounts for a modification patch.
-#[derive(Default)]
-struct MountPatchBuilder {
-    mounts: Vec<microsandbox::sandbox::VolumeMount>,
-    error: Option<microsandbox::MicrosandboxError>,
-}
-
-impl VolumeBuilder for MountPatchBuilder {
-    fn volume(
-        mut self,
-        guest: impl Into<String>,
-        configure: impl FnOnce(
-            microsandbox::sandbox::MountBuilder,
-        ) -> microsandbox::sandbox::MountBuilder,
-    ) -> Self {
-        match configure(microsandbox::sandbox::MountBuilder::new(guest)).build() {
-            Ok(mount) => self.mounts.push(mount),
-            Err(error) => {
-                self.error.get_or_insert(error);
-            }
-        }
-        self
-    }
-}
-
 /// Convert the `mounts=` kwarg of `modify()` into mounts, sorted by guest
 /// path for deterministic patch (and plan) ordering.
-pub(crate) fn parse_mount_patches(
-    mounts: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Vec<microsandbox::sandbox::VolumeMount>> {
+pub(crate) fn parse_mount_patches(mounts: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<VolumeMount>> {
     let Some(mounts) = mounts.filter(|mounts| !mounts.is_none()) else {
         return Ok(Vec::new());
     };
+
     let mut entries = Vec::new();
     for (guest, mount) in require_mapping_dict(mounts, "mounts")?.iter() {
         entries.push((
@@ -1051,10 +1051,12 @@ pub(crate) fn parse_mount_patches(
         ));
     }
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut builder = MountPatchBuilder::default();
     for (guest, mount) in entries {
         builder = apply_mount(builder, guest, &mount)?;
     }
+
     match builder.error {
         Some(error) => Err(crate::error::to_py_err(error)),
         None => Ok(builder.mounts),

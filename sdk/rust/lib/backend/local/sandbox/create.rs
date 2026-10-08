@@ -12,6 +12,7 @@ mod cleanup;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::pool::DbPools;
@@ -24,7 +25,6 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_q
 use tokio::sync::Mutex;
 
 use super::LocalBackend;
-use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
 use crate::backend::local::host_paths;
 use crate::backend::{Backend, SnapshotBackend};
@@ -48,6 +48,7 @@ use crate::sandbox::{
     validate_volume_mounts,
 };
 use crate::timing::{self, TARGET};
+use crate::{MicrosandboxError, MicrosandboxResult};
 use cleanup::CreationCleanup;
 
 //--------------------------------------------------------------------------------------------------
@@ -1832,13 +1833,13 @@ impl LocalBackend {
     pub(crate) async fn acquire_sandbox_transition_guard_with_timeout(
         run_dir: &Path,
         name: &str,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<Duration>,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
         let acquire = Self::acquire_sandbox_transition_guard_unbounded(run_dir, name);
         match timeout {
             None => acquire.await,
             Some(timeout) => tokio::time::timeout(timeout, acquire).await.map_err(|_| {
-                crate::MicrosandboxError::Runtime(format!(
+                MicrosandboxError::Runtime(format!(
                     "sandbox {name:?}: timed out waiting for a concurrent lifecycle operation"
                 ))
             })?,

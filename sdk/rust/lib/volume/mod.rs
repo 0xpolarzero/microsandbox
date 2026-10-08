@@ -872,13 +872,14 @@ where
         .await?;
 
     for sandbox in sandboxes {
-        // A running VM keeps the mounts it booted with, even after `modify` has
-        // staged a removal in the desired config.
+        // A running VM keeps the mounts it booted with, even after a modification
+        // has staged a removal in the desired config.
         let mut configs = vec![serde_json::from_str::<SandboxConfig>(&sandbox.config)?];
         if let Some(active) = &sandbox.active_config {
             configs.push(serde_json::from_str::<SandboxConfig>(active)?);
         }
-        if configs
+
+        let mounts_volume = configs
             .iter()
             .flat_map(|config| &config.spec.mounts)
             .any(|mount| {
@@ -889,8 +890,8 @@ where
                         ..
                     } if mounted_name == name
                 )
-            })
-        {
+            });
+        if mounts_volume {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "volume {name:?} is attached to active sandbox {:?}",
                 sandbox.name
@@ -1090,7 +1091,7 @@ mod tests {
     }
 
     /// With `staged_removal`, the desired config no longer lists the mount that the
-    /// running VM booted with, as after `modify --volume-rm --next-start`.
+    /// running VM booted with, as after a mount removal saved for the next start.
     #[cfg(feature = "local")]
     async fn exercise_named_volume_reference(status: SandboxStatus, staged_removal: bool) {
         let temp = tempfile::tempdir().unwrap();
@@ -1152,6 +1153,7 @@ mod tests {
         if staged_removal {
             config.spec.mounts.clear();
         }
+
         let sandbox = sandbox_entity::ActiveModel {
             name: Set("active-sandbox".to_string()),
             config: Set(serde_json::to_string(&config).unwrap()),

@@ -372,6 +372,107 @@ impl JsMountBuilder {
     }
 }
 
+impl JsBuiltVolumeMount {
+    /// Rebuild the core mount through the same builder validation as `MountBuilder`.
+    ///
+    /// Named volume creation settings are kept, so `modify` can refuse those it cannot apply.
+    pub(crate) fn into_core(self) -> Result<RustVolumeMount> {
+        let missing = |field: &str| {
+            napi::Error::from_reason(format!("{} mount requires `{field}`", self.kind))
+        };
+        let mut builder = JsMountBuilder::new(self.guest.clone());
+        match self.kind.as_str() {
+            "bind" => {
+                builder.bind(self.host.clone().ok_or_else(|| missing("host"))?);
+            }
+            "named" => {
+                builder.named_with(
+                    self.name.clone().ok_or_else(|| missing("name"))?,
+                    self.named_mode.clone(),
+                    self.named_kind.clone(),
+                    self.size_mib,
+                    self.quota_mib,
+                )?;
+            }
+            "owned" => {
+                let previous = builder.take_inner();
+                builder.inner = Some(previous.owned_with(|mut owned| {
+                    owned = if self.owned_kind.as_deref() == Some("disk") {
+                        owned.disk()
+                    } else {
+                        owned.directory()
+                    };
+                    if let Some(size) = self.size_mib {
+                        owned = owned.size(size);
+                    }
+                    if let Some(quota) = self.quota_mib {
+                        owned = owned.quota(quota);
+                    }
+                    owned
+                }));
+            }
+            "tmpfs" => {
+                builder.tmpfs();
+            }
+            "disk" => {
+                builder.disk(self.host.clone().ok_or_else(|| missing("host"))?);
+            }
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid mount kind `{other}` (expected bind | named | owned | tmpfs | disk)"
+                )));
+            }
+        }
+        // Apply every supplied option and let the core builder reject those that do not fit the
+        // kind, as create does. Named and owned mounts consumed `size_mib` and `quota_mib` above
+        // as storage settings.
+        if !matches!(self.kind.as_str(), "named" | "owned") {
+            if let Some(size) = self.size_mib {
+                builder.size(f64::from(size))?;
+            }
+            if let Some(quota) = self.quota_mib {
+                builder.quota(f64::from(quota))?;
+            }
+        }
+        if let Some(format) = self.format.clone() {
+            builder.format(format)?;
+        }
+        if let Some(fstype) = self.fstype.clone() {
+            builder.fstype(fstype);
+        }
+        if self.readonly {
+            builder.readonly();
+        }
+        if self.noexec {
+            builder.noexec();
+        }
+        if self.nosuid {
+            builder.nosuid();
+        }
+        if self.nodev {
+            builder.nodev();
+        }
+        if let Some(policy) = self.stat_virtualization.clone() {
+            builder.stat_virtualization(policy)?;
+        }
+        if let Some(policy) = self.host_permissions.clone() {
+            builder.host_permissions(policy)?;
+        }
+        match (self.override_uid, self.override_gid) {
+            (Some(uid), Some(gid)) => {
+                builder.owner(uid, gid)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "mount uid and gid must be specified together",
+                ));
+            }
+        }
+        builder.take_inner_builder()?.build().map_err(to_napi_error)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -587,107 +688,6 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             override_uid: None,
             override_gid: None,
         },
-    }
-}
-
-impl JsBuiltVolumeMount {
-    /// Rebuild the core mount through the same builder validation as `MountBuilder`.
-    ///
-    /// Named volume creation settings are kept, so `modify` can refuse those it cannot apply.
-    pub(crate) fn into_core(self) -> Result<RustVolumeMount> {
-        let missing = |field: &str| {
-            napi::Error::from_reason(format!("{} mount requires `{field}`", self.kind))
-        };
-        let mut builder = JsMountBuilder::new(self.guest.clone());
-        match self.kind.as_str() {
-            "bind" => {
-                builder.bind(self.host.clone().ok_or_else(|| missing("host"))?);
-            }
-            "named" => {
-                builder.named_with(
-                    self.name.clone().ok_or_else(|| missing("name"))?,
-                    self.named_mode.clone(),
-                    self.named_kind.clone(),
-                    self.size_mib,
-                    self.quota_mib,
-                )?;
-            }
-            "owned" => {
-                let previous = builder.take_inner();
-                builder.inner = Some(previous.owned_with(|mut owned| {
-                    owned = if self.owned_kind.as_deref() == Some("disk") {
-                        owned.disk()
-                    } else {
-                        owned.directory()
-                    };
-                    if let Some(size) = self.size_mib {
-                        owned = owned.size(size);
-                    }
-                    if let Some(quota) = self.quota_mib {
-                        owned = owned.quota(quota);
-                    }
-                    owned
-                }));
-            }
-            "tmpfs" => {
-                builder.tmpfs();
-            }
-            "disk" => {
-                builder.disk(self.host.clone().ok_or_else(|| missing("host"))?);
-            }
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "invalid mount kind `{other}` (expected bind | named | owned | tmpfs | disk)"
-                )));
-            }
-        }
-        // Apply every supplied option and let the core builder reject those that do not fit the
-        // kind, as create does. Named and owned mounts consumed `size_mib` and `quota_mib` above
-        // as storage settings.
-        if !matches!(self.kind.as_str(), "named" | "owned") {
-            if let Some(size) = self.size_mib {
-                builder.size(f64::from(size))?;
-            }
-            if let Some(quota) = self.quota_mib {
-                builder.quota(f64::from(quota))?;
-            }
-        }
-        if let Some(format) = self.format.clone() {
-            builder.format(format)?;
-        }
-        if let Some(fstype) = self.fstype.clone() {
-            builder.fstype(fstype);
-        }
-        if self.readonly {
-            builder.readonly();
-        }
-        if self.noexec {
-            builder.noexec();
-        }
-        if self.nosuid {
-            builder.nosuid();
-        }
-        if self.nodev {
-            builder.nodev();
-        }
-        if let Some(policy) = self.stat_virtualization.clone() {
-            builder.stat_virtualization(policy)?;
-        }
-        if let Some(policy) = self.host_permissions.clone() {
-            builder.host_permissions(policy)?;
-        }
-        match (self.override_uid, self.override_gid) {
-            (Some(uid), Some(gid)) => {
-                builder.owner(uid, gid)?;
-            }
-            (None, None) => {}
-            _ => {
-                return Err(napi::Error::from_reason(
-                    "mount uid and gid must be specified together",
-                ));
-            }
-        }
-        builder.take_inner_builder()?.build().map_err(to_napi_error)
     }
 }
 

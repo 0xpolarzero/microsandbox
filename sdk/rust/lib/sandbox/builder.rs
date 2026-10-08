@@ -2069,7 +2069,8 @@ pub(crate) fn prepare_local_snapshot_restore(
             }
             crate::snapshot::validate_checkpoint_owned_inventory(snap.manifest(), &opened)?;
             if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
-                // A disk-only restore drops the captured external binds; require them up front.
+                // A disk-only restore does not reconnect captured external binds; require
+                // destination mounts up front.
                 crate::sandbox::require_guest_mounts(
                     config,
                     crate::sandbox::external_bind_guest_paths(&opened.resources)?,

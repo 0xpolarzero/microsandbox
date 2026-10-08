@@ -1363,6 +1363,11 @@ export declare class SandboxBuilder {
   pullPolicy(policy: string): this
   /** Disable networking entirely. */
   disableNetwork(): this
+  /**
+   * Enable TLS interception, preserving existing network and TLS settings.
+   * Does not re-enable disabled networking. Later network() callbacks preserve settings unless changed.
+   */
+  interceptTls(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Configure the single proxy used for outbound sandbox connections. */

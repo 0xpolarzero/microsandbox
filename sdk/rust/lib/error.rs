@@ -5,6 +5,13 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Leading text of the restore refusal that lists guest paths without destination bindings.
+pub(crate) const MISSING_RESTORE_BINDINGS: &str = "restore requires destination bindings for:";
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -659,6 +666,14 @@ impl MicrosandboxError {
     pub fn cloud_only(op: Operation) -> MicrosandboxError {
         Self::unsupported(op, UnsupportedReason::CloudOnly)
     }
+
+    /// Whether a restore was refused because guest paths lack destination bindings.
+    ///
+    /// Callers can use this to add interface-specific guidance, such as how to supply the
+    /// missing mounts or allow missing resources.
+    pub fn is_missing_restore_bindings(&self) -> bool {
+        matches!(self, Self::InvalidConfig(message) if message.starts_with(MISSING_RESTORE_BINDINGS))
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -731,6 +746,19 @@ impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_restore_bindings_are_recognized_only_by_their_refusal() {
+        let refusal = MicrosandboxError::InvalidConfig(format!(
+            "{MISSING_RESTORE_BINDINGS} mount /data; provide a destination mount"
+        ));
+        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
+        let custom = MicrosandboxError::Custom(format!("{MISSING_RESTORE_BINDINGS} mount /data"));
+
+        assert!(refusal.is_missing_restore_bindings());
+        assert!(!other.is_missing_restore_bindings());
+        assert!(!custom.is_missing_restore_bindings());
+    }
 
     #[test]
     fn snapshot_source_recovery_details_keep_artifact_and_diagnostics_structured() {

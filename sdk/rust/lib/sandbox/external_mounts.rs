@@ -17,6 +17,7 @@ use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
     db::entity::{sandbox, volume},
+    error::MISSING_RESTORE_BINDINGS,
     snapshot::Manifest,
 };
 
@@ -469,7 +470,7 @@ fn integrity(error: impl std::fmt::Display) -> MicrosandboxError {
 /// Keep the entire missing set actionable without disclosing source host paths.
 fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(format!(
-        "restore requires destination bindings for: {}; provide --volume mappings, select captured disks with --volume GUEST, or explicitly use --allow-missing-resources",
+        "{MISSING_RESTORE_BINDINGS} {}; provide --volume mappings, select captured disks with --volume GUEST, or explicitly use --allow-missing-resources",
         missing.into_iter().collect::<Vec<_>>().join(", ")
     ))
 }
@@ -477,7 +478,7 @@ fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
 /// A disk restore maps host paths itself; captured disks cannot satisfy this check.
 fn missing_disk_mounts(missing: BTreeSet<String>) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(format!(
-        "restore requires destination bindings for: {}; provide --volume SOURCE:GUEST mappings or explicitly use --allow-missing-resources",
+        "{MISSING_RESTORE_BINDINGS} {}; provide a destination mount for each path or explicitly allow missing resources",
         missing.into_iter().collect::<Vec<_>>().join(", ")
     ))
 }
@@ -548,7 +549,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("restore requires destination bindings for: mount /data;"));
-        assert!(error.contains("--volume SOURCE:GUEST"));
+        assert!(error.contains("provide a destination mount for each path"));
+        assert!(error.contains("explicitly allow missing resources"));
+        assert!(!error.contains("--"));
         assert!(!error.contains("select captured disks"));
 
         let tmpfs = config(

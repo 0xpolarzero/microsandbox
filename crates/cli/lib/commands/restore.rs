@@ -1,8 +1,11 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
-use microsandbox::sandbox::{
-    ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+use microsandbox::{
+    MicrosandboxError,
+    sandbox::{
+        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+    },
 };
 
 #[cfg(feature = "net")]
@@ -11,7 +14,7 @@ use super::common::{
     display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
     parse_vsock_route,
 };
-use crate::ui;
+use crate::ui::{self, ErrorLine};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -237,10 +240,33 @@ pub async fn run(
     }
     let result = task.await;
     display.finish();
-    let sandbox = result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))??;
+    let sandbox = match result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))? {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            if let Some(hints) = missing_bindings_hints(&error) {
+                let lines: Vec<_> = hints.iter().map(|hint| ErrorLine::Hint(hint)).collect();
+                ui::error_with_lines(&error.to_string(), &lines);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+
+            return Err(error.into());
+        }
+    };
     display_restore_warnings(&sandbox).await;
     sandbox.detach().await;
     Ok(())
+}
+
+/// CLI guidance for a restore refused because guest paths lack destination bindings.
+fn missing_bindings_hints(error: &MicrosandboxError) -> Option<&'static [&'static str]> {
+    if !error.is_missing_restore_bindings() {
+        return None;
+    }
+
+    Some(&[
+        "map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST",
+        "or pass --allow-missing-resources to start without them",
+    ])
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -320,6 +346,21 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: RestoreArgs,
+    }
+
+    #[test]
+    fn missing_bindings_refusal_gets_flag_hints() {
+        let refusal = MicrosandboxError::InvalidConfig(
+            "restore requires destination bindings for: mount /data; provide a destination mount for each path or explicitly allow missing resources".into(),
+        );
+        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
+
+        let hints = missing_bindings_hints(&refusal).unwrap().join("\n");
+
+        assert!(hints.contains("-v SOURCE:GUEST"));
+        assert!(hints.contains("--mount-disk SOURCE:GUEST"));
+        assert!(hints.contains("--allow-missing-resources"));
+        assert!(missing_bindings_hints(&other).is_none());
     }
 
     #[test]

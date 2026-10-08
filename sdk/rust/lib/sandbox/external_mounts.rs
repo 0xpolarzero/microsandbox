@@ -470,7 +470,7 @@ fn integrity(error: impl std::fmt::Display) -> MicrosandboxError {
 /// Keep the entire missing set actionable without disclosing source host paths.
 fn missing_resources(missing: BTreeSet<String>) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(format!(
-        "{MISSING_RESTORE_BINDINGS} {}; provide --volume mappings, select captured disks with --volume GUEST, or explicitly use --allow-missing-resources",
+        "{MISSING_RESTORE_BINDINGS} {}; provide a destination mount or select a captured disk for each path, or explicitly allow missing resources",
         missing.into_iter().collect::<Vec<_>>().join(", ")
     ))
 }
@@ -512,8 +512,11 @@ mod tests {
             "disk /data".into(),
         ]))
         .to_string();
+
         assert!(error.contains("disk /data, filesystem /work"));
-        assert!(error.contains("--allow-missing-resources"));
+        assert!(error.contains("select a captured disk"));
+        assert!(error.contains("explicitly allow missing resources"));
+        assert!(!error.contains("--"));
         assert!(!error.contains("select relaxed"));
     }
 
@@ -556,7 +559,7 @@ mod tests {
         assert!(error.contains("provide a destination mount for each path"));
         assert!(error.contains("explicitly allow missing resources"));
         assert!(!error.contains("--"));
-        assert!(!error.contains("select captured disks"));
+        assert!(!error.contains("captured disk"));
 
         let tmpfs = config(
             SandboxBuilder::new("restore").volume("/data", |m| m.tmpfs()),

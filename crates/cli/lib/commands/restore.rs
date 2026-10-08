@@ -244,7 +244,7 @@ pub async fn run(
         Ok(sandbox) => sandbox,
         Err(error) => {
             if let Some(hints) = missing_bindings_hints(&error) {
-                let lines: Vec<_> = hints.iter().map(|hint| ErrorLine::Hint(hint)).collect();
+                let lines: Vec<_> = hints.into_iter().map(ErrorLine::Hint).collect();
                 ui::error_with_lines(&error.to_string(), &lines);
                 return Err(ui::AlreadyRenderedError.into());
             }
@@ -258,15 +258,24 @@ pub async fn run(
 }
 
 /// CLI guidance for a restore refused because guest paths lack destination bindings.
-fn missing_bindings_hints(error: &MicrosandboxError) -> Option<&'static [&'static str]> {
+fn missing_bindings_hints(error: &MicrosandboxError) -> Option<Vec<&'static str>> {
     if !error.is_missing_restore_bindings() {
         return None;
     }
 
-    Some(&[
-        "map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST",
-        "or pass --allow-missing-resources to start without them",
-    ])
+    let mut hints = vec!["map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST"];
+    // Only a full restore can select disks it captured; a disk restore never offers that.
+    // Read the remediation after the last `; ` so guest paths cannot change the hint.
+    let message = error.to_string();
+    let remediation = message
+        .rsplit_once("; ")
+        .map_or("", |(_, remediation)| remediation);
+    if remediation.contains("captured disk") {
+        hints.push("select a captured disk with -v GUEST");
+    }
+    hints.push("or pass --allow-missing-resources to start without them");
+
+    Some(hints)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -350,17 +359,37 @@ mod tests {
 
     #[test]
     fn missing_bindings_refusal_gets_flag_hints() {
-        let refusal = MicrosandboxError::InvalidConfig(
+        let disk_refusal = MicrosandboxError::InvalidConfig(
             "restore requires destination bindings for: mount /data; provide a destination mount for each path or explicitly allow missing resources".into(),
+        );
+        let full_refusal = MicrosandboxError::InvalidConfig(
+            "restore requires destination bindings for: disk /data, filesystem /work; provide a destination mount or select a captured disk for each path, or explicitly allow missing resources".into(),
         );
         let other = MicrosandboxError::InvalidConfig("invalid volume".into());
 
-        let hints = missing_bindings_hints(&refusal).unwrap().join("\n");
+        let disk_hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+        let full_hints = missing_bindings_hints(&full_refusal).unwrap().join("\n");
+
+        assert!(disk_hints.contains("-v SOURCE:GUEST"));
+        assert!(disk_hints.contains("--mount-disk SOURCE:GUEST"));
+        assert!(disk_hints.contains("--allow-missing-resources"));
+        assert!(!disk_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("-v SOURCE:GUEST"));
+        assert!(full_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("--allow-missing-resources"));
+        assert!(missing_bindings_hints(&other).is_none());
+    }
+
+    #[test]
+    fn missing_bindings_hint_ignores_guest_paths() {
+        let disk_refusal = MicrosandboxError::InvalidConfig(
+            "restore requires destination bindings for: mount /captured disk; provide a destination mount for each path or explicitly allow missing resources".into(),
+        );
+
+        let hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
 
         assert!(hints.contains("-v SOURCE:GUEST"));
-        assert!(hints.contains("--mount-disk SOURCE:GUEST"));
-        assert!(hints.contains("--allow-missing-resources"));
-        assert!(missing_bindings_hints(&other).is_none());
+        assert!(!hints.contains("-v GUEST"));
     }
 
     #[test]

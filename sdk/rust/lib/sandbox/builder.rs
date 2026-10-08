@@ -4035,7 +4035,7 @@ mod tests {
         assert!(
             error.contains("restore requires destination bindings for: mount /data, mount /logs")
         );
-        assert!(!error.contains("select captured disks"));
+        assert!(!error.contains("captured disk"));
 
         let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));
 

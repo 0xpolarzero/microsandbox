@@ -75,6 +75,7 @@ const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
 const WORKDIR_FIELD: &str = "workdir";
 const MOUNT_FIELD: &str = "mount";
+const RUNTIME_FIELD: &str = "runtime";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -335,18 +336,51 @@ impl SandboxModificationBuilder {
             mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?;
         plan.conflicts.extend(source_conflicts);
 
-        // Check the disks a restart would take without keeping them; apply reserves them.
-        let restart_required = self.policy == ModificationPolicy::Restart
-            && plan_requires_restart(&plan)
-            && running_status(status);
-        if let Some(local) = self.backend.as_local()
-            && restart_required
-            && plan.conflicts.is_empty()
-        {
-            let mut prospective = config.clone();
-            apply_mount_patch_to_config(&mut prospective, &self.patch)?;
-            let running = active.as_ref().unwrap_or(&config);
+        // Run apply's pre-mutation checks under its conditions, reporting refusals
+        // as conflicts. Apply refuses unsupported plans before reaching them.
+        let Some(local) = self.backend.as_local() else {
+            return Ok(plan);
+        };
+        if validate_apply_supported(&plan).is_err() {
+            return Ok(plan);
+        }
 
+        let prospective = match build_prospective_config(&config, &self.patch) {
+            Ok(prospective) => prospective,
+            Err((Some(field), MicrosandboxError::InvalidConfig(message))) => {
+                plan.conflicts.push(ModificationConflict {
+                    field: field.to_string(),
+                    message,
+                });
+                return Ok(plan);
+            }
+            Err((_, error)) => return Err(error),
+        };
+
+        let restart_required = plan_requires_restart(&plan) && running_status(status);
+        let runtime_refusal =
+            match validate_prospective_runtime(local, &prospective, &self.patch, restart_required)
+                .await
+            {
+                Ok(()) => None,
+                Err(
+                    error @ (MicrosandboxError::Runtime(_)
+                    | MicrosandboxError::Unsupported { .. }
+                    | MicrosandboxError::InvalidConfig(_)),
+                ) => Some(error.to_string()),
+                Err(error) => return Err(error),
+            };
+        if let Some(message) = runtime_refusal {
+            plan.conflicts.push(ModificationConflict {
+                field: RUNTIME_FIELD.to_string(),
+                message,
+            });
+            return Ok(plan);
+        }
+
+        // Check the disks a restart would take without keeping them; apply reserves them.
+        if restart_required {
+            let running = active.as_ref().unwrap_or(&config);
             match reserve_added_disks(local, running, &prospective).await {
                 Ok(_) => {}
                 Err(MicrosandboxError::InvalidConfig(message)) => {
@@ -431,14 +465,9 @@ impl SandboxModificationBuilder {
         if let Some(local) = self.backend.as_local() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
-            let mut prospective = config.clone();
-            apply_patch_to_config(&mut prospective, &self.patch);
-            apply_secret_patch_to_config(&mut prospective, &self.patch)?;
-            apply_mount_patch_to_config(&mut prospective, &self.patch)?;
-            serde_json::to_string(&prospective)?;
-            if restart_required || !self.patch.mounts.is_empty() {
-                validate_runtime_config(&prospective, local.config()).await?;
-            }
+            let prospective = prospective_config(&config, &self.patch)?;
+            validate_prospective_runtime(local, &prospective, &self.patch, restart_required)
+                .await?;
 
             // Named-volume locks span persistence and any stop/start; bounded transition
             // acquisition breaks the inverse lock order with create. A restart also locks the
@@ -1383,6 +1412,54 @@ fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResul
     }
 
     Ok(())
+}
+
+/// Build the config an apply would persist, checking that it serializes.
+fn prospective_config(
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<SandboxConfig> {
+    build_prospective_config(config, patch).map_err(|(_, error)| error)
+}
+
+/// Build the prospective config, naming the patch field whose application failed
+/// so dry runs can report it as a conflict on that field.
+fn build_prospective_config(
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> Result<SandboxConfig, (Option<&'static str>, MicrosandboxError)> {
+    let mut prospective = config.clone();
+
+    apply_patch_to_config(&mut prospective, patch);
+    apply_secret_patch_to_config(&mut prospective, patch)
+        .map_err(|error| (Some(SECRET_FIELD), error))?;
+    apply_mount_patch_to_config(&mut prospective, patch)
+        .map_err(|error| (Some(MOUNT_FIELD), error))?;
+
+    serde_json::to_string(&prospective).map_err(|error| (None, error.into()))?;
+
+    Ok(prospective)
+}
+
+/// Whether the installed runtime must accept the prospective config: a restart
+/// launches it, and mount changes are checked even when persisted for later.
+fn runtime_check_required(patch: &SandboxModificationPatch, restart_required: bool) -> bool {
+    restart_required || !patch.mounts.is_empty()
+}
+
+/// Check that the installed runtime can launch the prospective config. Apply
+/// and dry runs share this so a clean plan cannot hide a runtime refusal.
+async fn validate_prospective_runtime(
+    local: &LocalBackend,
+    prospective: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    restart_required: bool,
+) -> MicrosandboxResult<()> {
+    if !runtime_check_required(patch, restart_required) {
+        return Ok(());
+    }
+
+    validate_runtime_config(prospective, local.config()).await
 }
 
 fn plan_requires_restart(plan: &SandboxModificationPlan) -> bool {
@@ -6418,6 +6495,85 @@ mod tests {
         );
         assert!(error.contains("goes through symlink"), "{error}");
         assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_reports_file_mounts_the_runtime_cannot_launch() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let file = base.join("secret.txt");
+        std::fs::write(&file, "x").unwrap();
+        let patch = SandboxModificationPatch {
+            mounts: vec![bind_mount("/secret.txt", file.to_str().unwrap(), false)],
+            ..SandboxModificationPatch::default()
+        };
+
+        let mut plans = Vec::new();
+        for (dir, patch_version) in [("old", 15), ("new", 16)] {
+            let root = base.join(dir);
+            std::fs::create_dir_all(&root).unwrap();
+            let backend = backend_with_runtime(&root, patch_version).await;
+            let current = config(2, 1024);
+            insert_stopped_sandbox(&backend, &current).await;
+
+            let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+                .dry_run()
+                .await
+                .unwrap();
+            plans.push(plan);
+        }
+
+        let old = &plans[0];
+        assert_eq!(old.conflicts.len(), 1, "{:?}", old.conflicts);
+        assert_eq!(old.conflicts[0].field, RUNTIME_FIELD);
+        assert!(
+            old.conflicts[0].message.contains("isolated file mounts"),
+            "{:?}",
+            old.conflicts
+        );
+        assert!(plans[1].conflicts.is_empty(), "{:?}", plans[1].conflicts);
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn dry_run_reports_invalid_secrets_alongside_mount_changes() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let dir = base.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = backend_with_runtime(&base, 16).await;
+        let current = config(2, 1024);
+        insert_stopped_sandbox(&backend, &current).await;
+        let mut spec = source_spec("API_KEY", &["api.example.com"]);
+        spec.placeholder = Some(String::new());
+        let secret_only = patch_with_specs(vec![spec]);
+        let with_mount = SandboxModificationPatch {
+            mounts: vec![bind_mount("/data", dir.to_str().unwrap(), false)],
+            ..secret_only.clone()
+        };
+
+        let mut conflicts = Vec::new();
+        for patch in [secret_only, with_mount] {
+            let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .with_patch(patch)
+                .dry_run()
+                .await
+                .unwrap();
+            conflicts.push(plan.conflicts);
+        }
+
+        assert_eq!(conflicts[0], conflicts[1]);
+        assert_eq!(conflicts[0].len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0][0].field, SECRET_FIELD);
+        assert!(
+            conflicts[0][0]
+                .message
+                .contains("placeholder must not be empty"),
+            "{conflicts:?}"
+        );
     }
 
     #[cfg(unix)]

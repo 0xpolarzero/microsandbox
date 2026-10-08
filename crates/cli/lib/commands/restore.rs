@@ -1,8 +1,11 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
-use microsandbox::sandbox::{
-    ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+use microsandbox::{
+    MicrosandboxError, RestoreKind,
+    sandbox::{
+        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+    },
 };
 
 #[cfg(feature = "net")]
@@ -11,7 +14,7 @@ use super::common::{
     display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
     parse_vsock_route,
 };
-use crate::ui;
+use crate::ui::{self, ErrorLine};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -237,10 +240,37 @@ pub async fn run(
     }
     let result = task.await;
     display.finish();
-    let sandbox = result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))??;
+    let sandbox = match result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))? {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            if let Some(hints) = missing_bindings_hints(&error) {
+                let lines: Vec<_> = hints.into_iter().map(ErrorLine::Hint).collect();
+                ui::error_with_lines(&error.to_string(), &lines);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+
+            return Err(error.into());
+        }
+    };
     display_restore_warnings(&sandbox).await;
     sandbox.detach().await;
     Ok(())
+}
+
+/// CLI guidance for a restore refused because guest paths lack destination bindings.
+fn missing_bindings_hints(error: &MicrosandboxError) -> Option<Vec<&'static str>> {
+    let MicrosandboxError::MissingRestoreBindings { restore, .. } = error else {
+        return None;
+    };
+
+    let mut hints = vec!["map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST"];
+    // Only a full restore can select disks it captured; a disk restore never offers that.
+    if *restore == RestoreKind::Full {
+        hints.push("select a captured disk with -v GUEST");
+    }
+    hints.push("or pass --allow-missing-resources to start without them");
+
+    Some(hints)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -320,6 +350,44 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: RestoreArgs,
+    }
+
+    #[test]
+    fn missing_bindings_refusal_gets_flag_hints() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
+        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
+
+        let disk_hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+        let full_hints = missing_bindings_hints(&full_refusal).unwrap().join("\n");
+
+        assert!(disk_hints.contains("-v SOURCE:GUEST"));
+        assert!(disk_hints.contains("--mount-disk SOURCE:GUEST"));
+        assert!(disk_hints.contains("--allow-missing-resources"));
+        assert!(!disk_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("-v SOURCE:GUEST"));
+        assert!(full_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("--allow-missing-resources"));
+        assert!(missing_bindings_hints(&other).is_none());
+    }
+
+    #[test]
+    fn missing_bindings_hint_ignores_guest_paths() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /captured disk".into()],
+            restore: RestoreKind::Disk,
+        };
+
+        let hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+
+        assert!(hints.contains("-v SOURCE:GUEST"));
+        assert!(!hints.contains("-v GUEST"));
     }
 
     #[test]

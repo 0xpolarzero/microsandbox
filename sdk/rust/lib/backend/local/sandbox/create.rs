@@ -35,9 +35,11 @@ use crate::db::entity::{
 };
 use crate::runtime::handle::StartupProcess;
 use crate::runtime::launch_contract;
-use crate::runtime::spawn::EnsuredNamedVolumes;
+use crate::runtime::spawn::{
+    DiskReservations, EnsuredNamedVolumes, spawn_sandbox_with_disk_reservations,
+};
 use crate::runtime::{
-    ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
+    ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes,
 };
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
@@ -877,7 +879,13 @@ impl LocalBackend {
             .as_ref()
             .map(|restore| restore.closure.clone());
         let created = self
-            .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
+            .create_sandbox_inner(
+                config,
+                sandbox_id,
+                mode,
+                Some(lifecycle_guard),
+                DiskReservations::default(),
+            )
             .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
@@ -1121,11 +1129,19 @@ impl LocalBackend {
         sandbox_id: i32,
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
+        disk_reservations: DiskReservations,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
         let (handle, agent_sock_path) = timing::measure(
             &config.spec.name,
             "process_launch",
-            spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard),
+            spawn_sandbox_with_disk_reservations(
+                self,
+                &config,
+                sandbox_id,
+                mode,
+                lifecycle_guard,
+                disk_reservations,
+            ),
         )
         .await?;
         let mut startup_process = StartupProcess::new(handle);

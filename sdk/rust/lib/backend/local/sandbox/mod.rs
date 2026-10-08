@@ -43,6 +43,7 @@ use crate::db::entity::{
 };
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
+use crate::runtime::spawn::DiskReservations;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
@@ -70,7 +71,8 @@ impl LocalBackend {
     /// follow-up calls through this same backend.
     ///
     /// `transition_timeout` bounds only the wait for name transition ownership; `None` waits
-    /// indefinitely.
+    /// indefinitely. `disk_reservations` holds disks locked before this start; the runtime
+    /// receives those locks instead of new ones.
     pub(crate) async fn start_sandbox(
         &self,
         backend: Arc<dyn Backend>,
@@ -78,6 +80,7 @@ impl LocalBackend {
         expected_id: Option<i32>,
         mode: SpawnMode,
         transition_timeout: Option<Duration>,
+        disk_reservations: DiskReservations,
     ) -> MicrosandboxResult<Sandbox> {
         tracing::debug!(sandbox = name, ?mode, "start_local: loading record");
         // Serialize the state decision and launcher-to-runtime handoff by name. The database CAS
@@ -247,7 +250,7 @@ impl LocalBackend {
         let lifecycle_guard = None;
 
         match self
-            .create_sandbox_inner(config, model.id, mode, lifecycle_guard)
+            .create_sandbox_inner(config, model.id, mode, lifecycle_guard, disk_reservations)
             .await
         {
             Ok((local_state, returned_config)) => {
@@ -1229,8 +1232,15 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.start_sandbox(backend, name, None, SpawnMode::Attached, None)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                None,
+                SpawnMode::Attached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1240,8 +1250,15 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            self.start_sandbox(backend, name, None, SpawnMode::Detached, None)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                None,
+                SpawnMode::Detached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1253,8 +1270,15 @@ impl SandboxBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let expected_id = local_identity(identity)?;
-            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Attached, None)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                Some(expected_id),
+                SpawnMode::Attached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1266,8 +1290,15 @@ impl SandboxBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
             let expected_id = local_identity(identity)?;
-            self.start_sandbox(backend, name, Some(expected_id), SpawnMode::Detached, None)
-                .await
+            self.start_sandbox(
+                backend,
+                name,
+                Some(expected_id),
+                SpawnMode::Detached,
+                None,
+                DiskReservations::default(),
+            )
+            .await
         })
     }
 
@@ -1568,7 +1599,7 @@ mod tests {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::{SpawnMode, sandbox_entity};
+    use super::{DiskReservations, SpawnMode, sandbox_entity};
     use crate::backend::{Backend, BackendSelectionSource, LocalBackend, SandboxBackend};
     use crate::config::layers::BackendConfig;
     use crate::logs::{LogOptions, LogSource};
@@ -1849,6 +1880,7 @@ mod tests {
                 Some(stale_id),
                 SpawnMode::Attached,
                 None,
+                DiskReservations::default(),
             )
             .await
         {

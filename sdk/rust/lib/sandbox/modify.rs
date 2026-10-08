@@ -23,7 +23,7 @@ use microsandbox_control_client::{
 };
 
 use super::{SandboxConfig, SandboxStatus};
-use crate::runtime::spawn::EnsuredNamedVolumes;
+use crate::runtime::spawn::{DiskReservations, EnsuredNamedVolumes, reserve_added_disks};
 
 pub use microsandbox_types::modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
@@ -316,6 +316,31 @@ impl SandboxModificationBuilder {
         );
         plan.conflicts
             .extend(mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?);
+
+        // Check the disks a restart would take without keeping them; apply reserves them.
+        let restart_required = self.policy == ModificationPolicy::Restart
+            && plan_requires_restart(&plan)
+            && running_status(status);
+        if let Some(local) = self.backend.as_local()
+            && restart_required
+            && plan.conflicts.is_empty()
+        {
+            let mut prospective = config.clone();
+            apply_mount_patch_to_config(&mut prospective, &self.patch)?;
+            let running = active.as_ref().unwrap_or(&config);
+
+            match reserve_added_disks(local, running, &prospective).await {
+                Ok(_) => {}
+                Err(MicrosandboxError::InvalidConfig(message)) => {
+                    plan.conflicts.push(ModificationConflict {
+                        field: MOUNT_FIELD.to_string(),
+                        message,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
         Ok(plan)
     }
 
@@ -379,6 +404,7 @@ impl SandboxModificationBuilder {
             .iter()
             .any(|mount| matches!(mount, VolumeMount::Named { .. }));
         let mut _named_volumes = None;
+        let mut disk_reservations = DiskReservations::default();
         if let Some(local) = self.backend.as_local() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
@@ -398,6 +424,13 @@ impl SandboxModificationBuilder {
             // acquisition breaks the inverse lock order with create.
             if restart_required || adds_named {
                 _named_volumes = Some(lock_named_volumes(local, &prospective).await?);
+            }
+            // Disks another sandbox holds would fail the start after the stop, so take
+            // the disks the running sandbox does not hold now, including ones staged by an
+            // earlier next-start modification, and hand those same locks to the start.
+            if restart_required {
+                let running = active.as_ref().unwrap_or(&config);
+                disk_reservations = reserve_added_disks(local, running, &prospective).await?;
             }
         }
         if restart_required {
@@ -542,7 +575,7 @@ impl SandboxModificationBuilder {
             persist_config(&self.backend, &handle, &config).await?;
         }
         if restart_required {
-            start_after_modify(&self.backend, &handle)
+            start_after_modify(&self.backend, &handle, disk_reservations)
                 .await
                 .map_err(|error| {
                     restart_error(error, |detail| {
@@ -1751,9 +1784,12 @@ async fn persist_active_config(
     Ok(())
 }
 
+/// Start the sandbox after a restart-backed apply. The local start attaches the disks
+/// in `disk_reservations` with their reserved locks.
 async fn start_after_modify(
     backend: &Arc<dyn Backend>,
     handle: &super::SandboxHandle,
+    disk_reservations: DiskReservations,
 ) -> MicrosandboxResult<()> {
     let sandbox = match (backend.as_local(), handle.identity()) {
         (Some(local), SandboxIdentity::Local(id)) => {
@@ -1764,6 +1800,7 @@ async fn start_after_modify(
                     Some(id),
                     SpawnMode::Detached,
                     Some(RESTART_TRANSITION_TIMEOUT),
+                    disk_reservations,
                 )
                 .await?
         }
@@ -3422,6 +3459,8 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::fs::File;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     #[cfg(unix)]
@@ -5875,12 +5914,21 @@ mod tests {
 
     #[cfg(unix)]
     async fn insert_stopped_sandbox(backend: &Arc<dyn Backend>, config: &SandboxConfig) {
+        insert_sandbox(backend, config, SandboxStatus::Stopped).await;
+    }
+
+    #[cfg(unix)]
+    async fn insert_sandbox(
+        backend: &Arc<dyn Backend>,
+        config: &SandboxConfig,
+        status: SandboxStatus,
+    ) {
         let pools = backend.as_local().unwrap().db().await.unwrap();
         sandbox_entity::ActiveModel {
             name: Set(config.spec.name.clone()),
             config: Set(serde_json::to_string(config).unwrap()),
             active_config: Set(None),
-            status: Set(SandboxStatus::Stopped),
+            status: Set(status),
             ephemeral: Set(false),
             created_at: Set(None),
             updated_at: Set(None),
@@ -5987,6 +6035,279 @@ mod tests {
         let mut guests = mount_guests(&persisted);
         guests.sort();
         assert_eq!(guests, vec!["/follow", "/resolved", "/saved"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_apply_refuses_busy_disks_before_stopping() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        let disk = base.join("busy.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+        // Another sandbox attached the disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let patch = SandboxModificationPatch {
+            mounts: vec![MountBuilder::new("/busy").disk(&disk).build().unwrap()],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+
+        assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+        assert!(
+            plan.conflicts[0].message.contains("already attached"),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(error.contains("already attached"), "{error}");
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+        assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_check_named_disk_volumes_by_mode() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let local = backend.as_local().unwrap();
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        volume_entity::ActiveModel {
+            name: Set("shared".to_string()),
+            kind: Set("disk".to_string()),
+            disk_format: Set(Some("raw".to_string())),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        let volume_dir = local.volume_path("shared");
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        let disk = volume_dir.join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let reader = MountBuilder::new("/shared")
+            .named("shared")
+            .readonly()
+            .build()
+            .unwrap();
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![reader.clone()],
+                    ..SandboxModificationPatch::default()
+                })
+        };
+
+        // Another sandbox reads the volume: a read-only attachment can share it.
+        let holder = File::open(&disk).unwrap();
+        holder.lock_shared().unwrap();
+        let shared_plan = builder().dry_run().await.unwrap();
+        drop(holder);
+
+        // Another sandbox writes the volume: nothing else may attach it.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+        let exclusive_plan = builder().dry_run().await.unwrap();
+
+        assert!(
+            shared_plan.conflicts.is_empty(),
+            "{:?}",
+            shared_plan.conflicts
+        );
+        assert_eq!(exclusive_plan.conflicts.len(), 1);
+        assert!(
+            exclusive_plan.conflicts[0]
+                .message
+                .contains("volume \"shared\" is already attached"),
+            "{:?}",
+            exclusive_plan.conflicts
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_leave_named_disks_held_when_mounted_by_path() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let local = backend.as_local().unwrap();
+
+        volume_entity::ActiveModel {
+            name: Set("shared".to_string()),
+            kind: Set("disk".to_string()),
+            disk_format: Set(Some("raw".to_string())),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        let volume_dir = local.volume_path("shared");
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        let disk = volume_dir.join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let by_name = MountBuilder::new("/data").named("shared").build().unwrap();
+        let current = config_with_mounts(vec![by_name]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        // The running sandbox itself holds the volume's disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let by_path = MountBuilder::new("/data").disk(&disk).build().unwrap();
+
+        let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![by_path],
+                ..SandboxModificationPatch::default()
+            })
+            .dry_run()
+            .await
+            .unwrap();
+
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_reserves_disks_staged_for_the_next_start() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let disk = base.join("staged.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        // An earlier next-start modification staged the disk; the VM booted without it.
+        let staged = MountBuilder::new("/staged").disk(&disk).build().unwrap();
+        let current = config_with_mounts(vec![staged]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+        let running_json = serde_json::to_string(&config(2, 1024)).unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::ActiveConfig,
+                Expr::value(running_json),
+            )
+            .filter(sandbox_entity::Column::Name.eq(&current.spec.name))
+            .exec(backend.as_local().unwrap().db().await.unwrap().write())
+            .await
+            .unwrap();
+
+        // Another sandbox attached the disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        // The restart changes no mount, yet its start attaches the staged disk.
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    max_cpus: Some(4),
+                    ..SandboxModificationPatch::default()
+                })
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+        assert!(
+            plan.conflicts[0].message.contains("already attached"),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(error.contains("already attached"), "{error}");
+        assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
+        assert_eq!(
+            handle.config_json(),
+            serde_json::to_string(&current).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_leave_held_disks_and_refuse_aliases() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let disk = base.join("held.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+        let alias = base.join("alias.raw");
+        symlink(&disk, &alias).unwrap();
+
+        let held = MountBuilder::new("/held").disk(&disk).build().unwrap();
+        let current = config_with_mounts(vec![held]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        // The running sandbox itself holds its disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let reopened = MountBuilder::new("/held")
+            .disk(&disk)
+            .readonly()
+            .build()
+            .unwrap();
+        let aliased = MountBuilder::new("/alias").disk(&alias).build().unwrap();
+
+        let plan = |mount: VolumeMount| {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![mount],
+                    ..SandboxModificationPatch::default()
+                })
+                .dry_run()
+        };
+
+        let reopened_plan = plan(reopened).await.unwrap();
+        let aliased_plan = plan(aliased).await.unwrap();
+
+        assert!(
+            reopened_plan.conflicts.is_empty(),
+            "{:?}",
+            reopened_plan.conflicts
+        );
+        assert_eq!(aliased_plan.conflicts.len(), 1);
+        assert!(
+            aliased_plan.conflicts[0]
+                .message
+                .contains("attached more than once"),
+            "{:?}",
+            aliased_plan.conflicts
+        );
     }
 
     #[test]

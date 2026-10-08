@@ -480,7 +480,7 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-`--next-start` saves the desired configuration without touching the running VM. `--restart` stops and starts the sandbox only when the patch needs it. The default policy does neither and rejects restart-required changes. On a running sandbox that has no recorded active configuration (one started by an older release), `--next-start` cannot stage removing the last reference to a named volume; use `--restart` or stop the sandbox first.
+`--next-start` saves the desired configuration without touching the running VM. `--restart` stops and starts the sandbox only when the patch needs it; if the sandbox cannot start with the changes, its previous configuration is restored and it is started again. The default policy does neither and rejects restart-required changes. On a running sandbox that has no recorded active configuration (one started by an older release), `--next-start` cannot stage removing the last reference to a named volume; use `--restart` or stop the sandbox first.
 
 Root disk resizing remains conservative: managed and flat OCI disks grow only, tmpfs can grow or shrink at the next boot, and user-supplied disk images are never resized by microsandbox. Named volume and mount capacity is managed where that storage is defined. See [Volumes](/sandboxes/volumes) and [Images](/images/overview) for the storage model.
 

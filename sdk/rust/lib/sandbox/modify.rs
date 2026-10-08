@@ -1,6 +1,9 @@
 //! Sandbox modification planning.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use microsandbox_types::{
     EnvVar, HostPermissions, MountOptions, OwnedVolumeStorage, RootDisk, RootfsSource,
@@ -351,11 +354,13 @@ impl SandboxModificationBuilder {
     /// the desired config is persisted only after the live step succeeds. For
     /// stopped sandboxes or `next_start` requests, changes persist for the next
     /// start. When the policy is `restart`, the existing stop/start lifecycle
-    /// path makes restart-required changes active. Live secret rotation,
-    /// removal, and allowed-host updates go through the runtime control
-    /// socket; the durable config records host-side source references for
-    /// source-based specs and persists the value for value-based specs (the
-    /// same at-rest property as create's `secret_env`).
+    /// path makes restart-required changes active; if that start fails, the
+    /// previous config is restored and started again, and `apply` returns an
+    /// error. Live secret rotation, removal, and allowed-host updates go
+    /// through the runtime control socket; the durable config records
+    /// host-side source references for source-based specs and persists the
+    /// value for value-based specs (the same at-rest property as create's
+    /// `secret_env`).
     ///
     /// Configuring a secret that requires TLS identity on a sandbox with
     /// interception off also turns interception on. That is planned as a
@@ -421,8 +426,12 @@ impl SandboxModificationBuilder {
                 .await?;
             }
             // Named-volume locks span persistence and any stop/start; bounded transition
-            // acquisition breaks the inverse lock order with create.
-            if restart_required || adds_named {
+            // acquisition breaks the inverse lock order with create. A restart also locks the
+            // volumes of the configuration a failed start falls back to.
+            if restart_required {
+                _named_volumes =
+                    Some(lock_restart_named_volumes(local, &prospective, &config).await?);
+            } else if adds_named {
                 _named_volumes = Some(lock_named_volumes(local, &prospective).await?);
             }
             // Disks another sandbox holds would fail the start after the stop, so take
@@ -568,23 +577,22 @@ impl SandboxModificationBuilder {
         {
             grow_root_disk_now(&self.backend, &self.name, &config, target_mib).await?;
         }
+        let mut saved_config_json = handle.config_json().to_owned();
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             apply_secret_patch_to_config(&mut config, &self.patch)?;
             apply_mount_patch_to_config(&mut config, &self.patch)?;
-            persist_config(&self.backend, &handle, &config).await?;
+            saved_config_json = persist_config(&self.backend, &handle, &config).await?;
         }
         if restart_required {
-            start_after_modify(&self.backend, &handle, disk_reservations)
-                .await
-                .map_err(|error| {
-                    restart_error(error, |detail| {
-                        format!(
-                            "configuration was saved, but restart did not complete: {detail}. Inspect sandbox {name}; if it is stopped, run `msb start {name}`",
-                            name = self.name
-                        )
-                    })
-                })?;
+            start_or_restore(
+                &self.backend,
+                &handle,
+                saved_config_json,
+                disk_reservations,
+                |reservations| start_after_modify(&self.backend, &handle, reservations),
+            )
+            .await?;
         }
         plan.applied = true;
         Ok(plan)
@@ -1711,11 +1719,34 @@ fn resolve_secret_source_value(
     }
 }
 
+/// Save the configuration and its labels, returning the saved configuration text.
 async fn persist_config(
     backend: &Arc<dyn Backend>,
     handle: &super::SandboxHandle,
     config: &SandboxConfig,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<String> {
+    let config_json = serde_json::to_string(config)?;
+    persist_config_json(
+        backend,
+        handle,
+        config_json.clone(),
+        config.spec.labels.clone(),
+        None,
+    )
+    .await?;
+    Ok(config_json)
+}
+
+/// Save serialized configuration and its labels. With `expected_config`, save them only
+/// while the saved configuration is still exactly that text and the sandbox is in a status a
+/// start can claim, and return whether they were saved.
+async fn persist_config_json(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    config_json: String,
+    labels: BTreeMap<String, String>,
+    expected_config: Option<String>,
+) -> MicrosandboxResult<bool> {
     let local = handle
         .local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
@@ -1723,24 +1754,40 @@ async fn persist_config(
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
-    let labels = config.spec.labels.clone();
     let write_db = local_backend.db().await?.write();
-    let config_json = serde_json::to_string(config)?;
 
     write_db
         .transaction(|txn| {
             let config_json = config_json.clone();
             let labels = labels.clone();
+            let expected_config = expected_config.clone();
             async move {
-                sandbox_entity::Entity::update_many()
+                let mut update = sandbox_entity::Entity::update_many()
                     .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
                     .col_expr(
                         sandbox_entity::Column::UpdatedAt,
                         Expr::value(chrono::Utc::now().naive_utc()),
                     )
-                    .filter(sandbox_entity::Column::Id.eq(local.db_id))
-                    .exec(&txn)
-                    .await?;
+                    .filter(sandbox_entity::Column::Id.eq(local.db_id));
+                if let Some(expected_config) = &expected_config {
+                    // A start claims the sandbox by moving one of these statuses to Starting
+                    // in a single conditional update, so checking them in this update is enough:
+                    // either a competing start already claimed the sandbox and this save is
+                    // refused, or the competing start claims it afterwards and boots the
+                    // configuration saved here.
+                    update = update
+                        .filter(sandbox_entity::Column::Config.eq(expected_config))
+                        .filter(sandbox_entity::Column::Status.is_in([
+                            SandboxStatus::Created,
+                            SandboxStatus::Stopped,
+                            SandboxStatus::Crashed,
+                        ]));
+                }
+                let updated = update.exec(&txn).await?;
+
+                if expected_config.is_some() && updated.rows_affected == 0 {
+                    return Ok((txn, false));
+                }
 
                 sandbox_label_entity::Entity::delete_many()
                     .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
@@ -1758,7 +1805,7 @@ async fn persist_config(
                     .await?;
                 }
 
-                Ok((txn, ()))
+                Ok((txn, true))
             }
         })
         .await
@@ -1810,6 +1857,80 @@ async fn start_after_modify(
     Ok(())
 }
 
+/// Start the sandbox with its new configuration through `start`. If that fails, save the
+/// configuration `handle` was loaded with and start the sandbox again, so a configuration
+/// that cannot boot never stays saved. The previous configuration is saved back only while
+/// `saved_config_json`, the configuration this apply saved, is still the saved one and the
+/// sandbox is not starting or running: a change another operation saved meanwhile is kept, a
+/// start another operation claimed meanwhile keeps its configuration, and the sandbox is not
+/// started again.
+///
+/// `start` returns a plain future rather than being an async closure, so the apply future
+/// stays `Send` for the language bindings that spawn it.
+async fn start_or_restore<Start, Started>(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    saved_config_json: String,
+    disk_reservations: DiskReservations,
+    mut start: Start,
+) -> MicrosandboxResult<()>
+where
+    Start: FnMut(DiskReservations) -> Started,
+    Started: Future<Output = MicrosandboxResult<()>>,
+{
+    let Err(error) = start(disk_reservations).await else {
+        return Ok(());
+    };
+
+    // `handle` was loaded before this apply, so it still holds the previous configuration.
+    // A root disk grown for this apply stays grown: saving the smaller previous size is safe
+    // because a start only grows the disk up to the saved size and never shrinks it.
+    let previous_config_json = handle.config_json().to_owned();
+    let previous_labels = handle.config()?.spec.labels;
+    let restore = persist_config_json(
+        backend,
+        handle,
+        previous_config_json,
+        previous_labels,
+        Some(saved_config_json),
+    )
+    .await;
+    match restore {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(restart_outcome_error(error, |detail| {
+                format!(
+                    "the restart with the requested changes failed: {detail}; the sandbox or its configuration changed concurrently, so the previous configuration was not restored and the sandbox was not restarted"
+                )
+            }));
+        }
+        Err(restore_error) => {
+            return Err(restart_outcome_error(error, |detail| {
+                format!(
+                    "requested changes are saved, but the restart with them failed: {detail}; restoring the previous configuration also failed: {restore_error}"
+                )
+            }));
+        }
+    }
+
+    // The reservations went to the first start and cover only disks the changes add; the
+    // previous configuration locks its own disks as any start does.
+    let previous_start = start(DiskReservations::default()).await;
+
+    match previous_start {
+        Ok(()) => Err(restart_outcome_error(error, |detail| {
+            format!(
+                "requested changes were not applied; the previous configuration was restored and the sandbox restarted. The restart with the changes failed: {detail}"
+            )
+        })),
+        Err(rollback_error) => Err(restart_outcome_error(error, |detail| {
+            format!(
+                "requested changes were not applied; the previous configuration is saved, but the sandbox did not restart with it: {rollback_error}. The restart with the changes failed: {detail}"
+            )
+        })),
+    }
+}
+
 /// Rewrite the detail of a runtime error; other errors keep their type.
 fn restart_error(
     error: MicrosandboxError,
@@ -1818,6 +1939,35 @@ fn restart_error(
     match error {
         MicrosandboxError::Runtime(detail) => MicrosandboxError::Runtime(message(detail)),
         other => other,
+    }
+}
+
+/// Rewrite a failed start's detail with `message`, the outcome of the restart and its
+/// rollback. Errors that carry a free-form detail keep their type, so callers can still branch
+/// on it; a boot failure keeps its stage and errno. Any other error has no detail to rewrite and
+/// becomes a runtime error built from its full text, so the outcome `message` describes always
+/// reaches the caller.
+fn restart_outcome_error(
+    error: MicrosandboxError,
+    message: impl FnOnce(String) -> String,
+) -> MicrosandboxError {
+    match error {
+        MicrosandboxError::Runtime(detail) => MicrosandboxError::Runtime(message(detail)),
+        MicrosandboxError::InvalidConfig(detail) => {
+            MicrosandboxError::InvalidConfig(message(detail))
+        }
+        MicrosandboxError::RuntimeNotInstalled(detail) => {
+            MicrosandboxError::RuntimeNotInstalled(message(detail))
+        }
+        MicrosandboxError::RuntimeIncomplete(detail) => {
+            MicrosandboxError::RuntimeIncomplete(message(detail))
+        }
+        MicrosandboxError::Custom(detail) => MicrosandboxError::Custom(message(detail)),
+        MicrosandboxError::BootStart { name, mut err } => {
+            err.message = message(err.message);
+            MicrosandboxError::BootStart { name, err }
+        }
+        other => MicrosandboxError::Runtime(message(other.to_string())),
     }
 }
 
@@ -2778,6 +2928,31 @@ async fn lock_named_volumes(
     crate::runtime::ensure_named_volumes(local, &config.clone_for_persistence()).await
 }
 
+/// Lock the named volumes of `prospective` and of `previous`, the configuration a failed
+/// restart starts again, in one sorted acquisition, so none can be removed until the
+/// restart and any rollback finish.
+async fn lock_restart_named_volumes(
+    local: &crate::LocalBackend,
+    prospective: &SandboxConfig,
+    previous: &SandboxConfig,
+) -> MicrosandboxResult<EnsuredNamedVolumes> {
+    let mut lock_scope = prospective.clone();
+    for mount in &previous.spec.mounts {
+        let VolumeMount::Named { .. } = mount else {
+            continue;
+        };
+
+        // Only the locks are wanted: the previous volumes already exist.
+        let mut mount = mount.clone();
+        if let VolumeMount::Named { create, .. } = &mut mount {
+            *create = None;
+        }
+        lock_scope.spec.mounts.push(mount);
+    }
+
+    lock_named_volumes(local, &lock_scope).await
+}
+
 /// Reject added mounts whose source is already missing, or whose bind root goes
 /// through a symlink the runtime would refuse, so a restart-backed apply does not
 /// stop the VM only to fail its start. Bind paths and disk images the host changes
@@ -3460,12 +3635,16 @@ fn format_mib(mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
+    use std::cell::RefCell;
+    #[cfg(unix)]
     use std::fs::File;
+    use std::future;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     #[cfg(unix)]
     use std::path::Path;
 
+    use microsandbox_runtime::boot_error::{BootError, BootErrorStage};
     use microsandbox_types::DiskImageFormat;
     use sea_orm::ActiveModelTrait;
     use tempfile::tempdir;
@@ -5577,6 +5756,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_named_volume_guard_covers_the_previous_config() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let local = backend.as_local().unwrap();
+        let pools = local.db().await.unwrap();
+        for name in ["data", "logs"] {
+            volume_entity::ActiveModel {
+                name: Set(name.to_string()),
+                kind: Set("directory".to_string()),
+                created_at: Set(Some(chrono::Utc::now().naive_utc())),
+                updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+                ..Default::default()
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+        }
+
+        // The change replaces the mount of `data` with one of `logs`.
+        let mut previous = config(2, 1024);
+        previous.spec.mounts = vec![MountBuilder::new("/vol").named("data").build().unwrap()];
+        let mut prospective = config(2, 1024);
+        prospective.spec.mounts = vec![MountBuilder::new("/vol").named("logs").build().unwrap()];
+
+        let guard = lock_restart_named_volumes(local, &prospective, &previous)
+            .await
+            .unwrap();
+        let mut previous_removal = Box::pin(crate::volume::remove_local(backend.clone(), "data"));
+        let mut prospective_removal =
+            Box::pin(crate::volume::remove_local(backend.clone(), "logs"));
+        let blocked_previous = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            previous_removal.as_mut(),
+        )
+        .await;
+        let blocked_prospective = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            prospective_removal.as_mut(),
+        )
+        .await;
+
+        assert!(
+            blocked_previous.is_err(),
+            "the previous config's volume was removed during the restart"
+        );
+        assert!(
+            blocked_prospective.is_err(),
+            "the new config's volume was removed during the restart"
+        );
+
+        // Releasing the guard allows both pending removals to finish.
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), previous_removal)
+            .await
+            .expect("removal did not resume after the guard dropped")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), prospective_removal)
+            .await
+            .expect("removal did not resume after the guard dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn restart_apply_refuses_within_the_bound_when_the_transition_guard_is_held() {
         let temp = tempdir().unwrap();
         let local = LocalBackend::builder()
@@ -5737,16 +5986,99 @@ mod tests {
     }
 
     #[test]
-    fn restart_errors_rewrite_only_runtime_details() {
+    fn stop_errors_rewrite_only_runtime_details() {
+        let timeout = std::time::Duration::from_secs(5);
+        let stop_failures = vec![
+            MicrosandboxError::StopTimeout {
+                name: "api".into(),
+                identity: "sandbox-1".into(),
+                timeout,
+            },
+            MicrosandboxError::SandboxStillRunning("api".into()),
+            MicrosandboxError::SandboxReplaced {
+                name: "api".into(),
+                expected: "sandbox-1".into(),
+                actual: "sandbox-2".into(),
+            },
+            MicrosandboxError::InvalidConfig("bad".into()),
+        ];
+        let expected_texts: Vec<_> = stop_failures.iter().map(ToString::to_string).collect();
+
         let wrapped = restart_error(MicrosandboxError::Runtime("boom".into()), |detail| {
             format!("wrapped: {detail}")
         });
+        let mut kept = Vec::new();
+        for error in stop_failures {
+            kept.push(restart_error(error, |_| unreachable!()));
+        }
+
         assert_eq!(wrapped.to_string(), "runtime error: wrapped: boom");
-        let kept = restart_error(
-            MicrosandboxError::InvalidConfig("bad".into()),
-            |_| unreachable!(),
+        assert!(matches!(kept[0], MicrosandboxError::StopTimeout { .. }));
+        assert!(matches!(kept[1], MicrosandboxError::SandboxStillRunning(_)));
+        assert!(matches!(kept[2], MicrosandboxError::SandboxReplaced { .. }));
+        assert!(matches!(kept[3], MicrosandboxError::InvalidConfig(_)));
+        let kept_texts: Vec<_> = kept.iter().map(ToString::to_string).collect();
+        assert_eq!(kept_texts, expected_texts);
+    }
+
+    #[test]
+    fn restart_outcome_errors_rewrite_details_and_keep_their_type() {
+        let wrapped = restart_outcome_error(MicrosandboxError::Runtime("boom".into()), |detail| {
+            format!("wrapped: {detail}")
+        });
+        let wrapped_config =
+            restart_outcome_error(MicrosandboxError::InvalidConfig("bad".into()), |detail| {
+                format!("wrapped: {detail}")
+            });
+        let wrapped_custom =
+            restart_outcome_error(MicrosandboxError::Custom("odd".into()), |detail| {
+                format!("wrapped: {detail}")
+            });
+
+        assert_eq!(wrapped.to_string(), "runtime error: wrapped: boom");
+        assert_eq!(wrapped_config.to_string(), "invalid config: wrapped: bad");
+        assert!(matches!(wrapped_custom, MicrosandboxError::Custom(_)));
+        assert_eq!(wrapped_custom.to_string(), "wrapped: odd");
+    }
+
+    #[test]
+    fn restart_outcome_errors_rewrite_boot_failures_and_keep_their_record() {
+        let boot_failure = MicrosandboxError::BootStart {
+            name: "api".into(),
+            err: BootError {
+                t: "2026-10-08T00:00:00Z".into(),
+                stage: BootErrorStage::Mount,
+                errno: Some(2),
+                reason: None,
+                message: "mount data: No such file or directory (os error 2)".into(),
+            },
+        };
+
+        let wrapped = restart_outcome_error(boot_failure, |detail| format!("wrapped: {detail}"));
+
+        let MicrosandboxError::BootStart { name, err } = wrapped else {
+            panic!("the boot failure changed type: {wrapped:?}");
+        };
+        assert_eq!(name, "api");
+        assert_eq!(err.stage, BootErrorStage::Mount);
+        assert_eq!(err.errno, Some(2));
+        assert_eq!(
+            err.message,
+            "wrapped: mount data: No such file or directory (os error 2)"
         );
-        assert!(matches!(kept, MicrosandboxError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn restart_outcome_errors_without_a_detail_become_runtime_errors() {
+        let wrapped = restart_outcome_error(
+            MicrosandboxError::SandboxStillRunning("api".into()),
+            |detail| format!("wrapped: {detail}"),
+        );
+
+        let MicrosandboxError::Runtime(message) = wrapped else {
+            panic!("the error was not wrapped: {wrapped:?}");
+        };
+        assert_eq!(message, "wrapped: sandbox still running: api");
     }
 
     #[tokio::test]
@@ -6308,6 +6640,337 @@ mod tests {
             "{:?}",
             aliased_plan.conflicts
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_restores_the_previous_config_and_starts_it() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let mut previous = config(2, 1024);
+        previous.spec.labels.insert("team".into(), "infra".into());
+        let previous_json = saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let mut changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        changed.spec.labels.insert("team".into(), "data".into());
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        let started_configs = RefCell::new(Vec::new());
+        let guest_mount_failure = MicrosandboxError::BootStart {
+            name: "api".into(),
+            err: BootError {
+                t: "2026-10-08T00:00:00Z".into(),
+                stage: BootErrorStage::Mount,
+                errno: Some(13),
+                reason: None,
+                message: "guest mount failed".into(),
+            },
+        };
+        let mut results = vec![Err(guest_mount_failure), Ok(())].into_iter();
+        let start = |_: DiskReservations| {
+            let result = results.next().unwrap();
+            let backend = &backend;
+            let started_configs = &started_configs;
+            async move {
+                let saved = backend.sandboxes().get(backend.clone(), "api").await?;
+                started_configs
+                    .borrow_mut()
+                    .push(saved.config_json().to_owned());
+                result
+            }
+        };
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json.clone(),
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let label_rows = sandbox_label_entity::Entity::find()
+            .all(backend.as_local().unwrap().db().await.unwrap().read())
+            .await
+            .unwrap();
+        let labels: Vec<_> = label_rows
+            .into_iter()
+            .map(|row| (row.key, row.value))
+            .collect();
+
+        let MicrosandboxError::BootStart { err, .. } = error else {
+            panic!("the boot failure changed type: {error:?}");
+        };
+        let message = err.message;
+        assert!(
+            message.contains("previous configuration was restored and the sandbox restarted"),
+            "{message}"
+        );
+        assert!(message.contains("guest mount failed"), "{message}");
+        assert_eq!(err.stage, BootErrorStage::Mount);
+        assert_eq!(
+            started_configs.into_inner(),
+            vec![changed_json, previous_json]
+        );
+        assert_eq!(labels, vec![("team".to_string(), "infra".to_string())]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restore_start_reports_both_failures() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let previous = config(2, 1024);
+        let previous_json = saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        let mut results = vec![
+            Err(MicrosandboxError::InvalidConfig("disk is busy".into())),
+            Err(MicrosandboxError::Runtime("runtime exited".into())),
+        ]
+        .into_iter();
+        let start = |_: DiskReservations| future::ready(results.next().unwrap());
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json,
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        let MicrosandboxError::InvalidConfig(message) = error else {
+            panic!("the configuration error changed type: {error:?}");
+        };
+        assert!(
+            message.contains("previous configuration is saved, but the sandbox did not restart"),
+            "{message}"
+        );
+        assert!(message.contains("runtime exited"), "{message}");
+        assert!(message.contains("disk is busy"), "{message}");
+        assert_eq!(saved.config_json(), previous_json);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_keeps_a_config_saved_concurrently() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let previous = config(2, 1024);
+        saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        // Another modification saves its own change while the first start fails.
+        let mut concurrent = config(4, 2048);
+        concurrent.spec.labels.insert("team".into(), "web".into());
+        let concurrent_json = serde_json::to_string(&concurrent).unwrap();
+        let start_count = RefCell::new(0);
+        let start = |_: DiskReservations| {
+            let backend = &backend;
+            let handle = &handle;
+            let concurrent = &concurrent;
+            let start_count = &start_count;
+            async move {
+                *start_count.borrow_mut() += 1;
+                persist_config(backend, handle, concurrent).await?;
+                Err(MicrosandboxError::Runtime("runtime exited".into()))
+            }
+        };
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json,
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        let MicrosandboxError::Runtime(message) = error else {
+            panic!("the runtime error changed type: {error:?}");
+        };
+        assert!(
+            message.contains("the sandbox or its configuration changed concurrently"),
+            "{message}"
+        );
+        assert!(message.contains("runtime exited"), "{message}");
+        assert_eq!(start_count.into_inner(), 1);
+        assert_eq!(saved.config_json(), concurrent_json);
+        assert_eq!(saved.config().unwrap().spec.labels, concurrent.spec.labels);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_keeps_the_config_a_competing_start_claimed() {
+        for competing_status in [SandboxStatus::Starting, SandboxStatus::Running] {
+            let temp = tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let backend = backend_with_runtime(&base, 7).await;
+            let mut previous = config(2, 1024);
+            previous.spec.labels.insert("team".into(), "infra".into());
+            saved_previous_config(&backend, &previous).await;
+
+            let handle = backend
+                .sandboxes()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+            let mut changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+            changed.spec.labels.insert("team".into(), "data".into());
+            let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+            // Another start claims the sandbox with the saved changes while the first start fails.
+            let start_count = RefCell::new(0);
+            let start = |_: DiskReservations| {
+                let backend = &backend;
+                let start_count = &start_count;
+                async move {
+                    *start_count.borrow_mut() += 1;
+                    sandbox_entity::Entity::update_many()
+                        .col_expr(
+                            sandbox_entity::Column::Status,
+                            Expr::value(competing_status),
+                        )
+                        .filter(sandbox_entity::Column::Name.eq("api"))
+                        .exec(backend.as_local().unwrap().db().await?.write())
+                        .await?;
+                    Err(MicrosandboxError::Runtime("runtime exited".into()))
+                }
+            };
+
+            let error = start_or_restore(
+                &backend,
+                &handle,
+                changed_json.clone(),
+                DiskReservations::default(),
+                start,
+            )
+            .await
+            .unwrap_err();
+            let saved = backend
+                .sandboxes()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+
+            let MicrosandboxError::Runtime(message) = error else {
+                panic!("the runtime error changed type: {error:?}");
+            };
+            assert!(
+                message.contains("the sandbox or its configuration changed concurrently"),
+                "{message}"
+            );
+            assert_eq!(start_count.into_inner(), 1);
+            assert_eq!(saved.config_json(), changed_json);
+            assert_eq!(saved.config().unwrap().spec.labels, changed.spec.labels);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_apply_that_cannot_start_keeps_the_previous_config() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+        // Starts reach the runtime launch only when the sandbox directory exists.
+        let sandbox_dir = backend.as_local().unwrap().sandboxes_dir().join("api");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let previous_json = serde_json::to_string(&current).unwrap();
+
+        // The stale running record stops cleanly, but the fake runtime never starts.
+        let error = SandboxModificationBuilder::new(backend.clone(), "api")
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![bind_mount("/data", data.to_str().unwrap(), false)],
+                ..SandboxModificationPatch::default()
+            })
+            .apply()
+            .await
+            .unwrap_err()
+            .to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        assert!(
+            error.contains("previous configuration is saved, but the sandbox did not restart"),
+            "{error}"
+        );
+        assert_eq!(handle.config_json(), previous_json);
+        assert!(
+            !matches!(
+                handle.status_snapshot(),
+                SandboxStatus::Running | SandboxStatus::Starting
+            ),
+            "{:?}",
+            handle.status_snapshot()
+        );
+    }
+
+    /// Insert a stopped sandbox whose saved configuration is pretty-printed, which
+    /// re-serializing it would not reproduce. Returns the saved text.
+    #[cfg(unix)]
+    async fn saved_previous_config(backend: &Arc<dyn Backend>, previous: &SandboxConfig) -> String {
+        insert_stopped_sandbox(backend, previous).await;
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let previous_json = serde_json::to_string_pretty(previous).unwrap();
+
+        persist_config_json(
+            backend,
+            &handle,
+            previous_json.clone(),
+            previous.spec.labels.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        previous_json
     }
 
     #[test]

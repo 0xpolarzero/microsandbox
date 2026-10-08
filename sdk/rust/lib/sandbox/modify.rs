@@ -6,8 +6,9 @@ use std::{
 };
 
 use microsandbox_types::{
-    EnvVar, HostPermissions, MountOptions, OwnedVolumeStorage, RootDisk, RootfsSource,
-    SecretSubstitution, SecretViolationAction, StatVirtualization, VolumeMount,
+    EnvVar, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode, OwnedVolumeStorage,
+    RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction, StatVirtualization,
+    VolumeKind, VolumeMount,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
@@ -216,7 +217,8 @@ impl SandboxModificationBuilder {
     /// Mounts are fixed when the VM boots, so a running sandbox needs
     /// [`next_start`](Self::next_start) or [`restart`](Self::restart).
     /// Sandbox-owned volumes cannot be added here: they are created with the
-    /// sandbox.
+    /// sandbox. A named volume must already exist, so a mount that carries
+    /// creation settings such as a quota is a conflict.
     ///
     /// ```ignore
     /// sandbox.modify()
@@ -2631,6 +2633,16 @@ fn resolve_mount_patch(
         if let VolumeMount::Named { create, .. } = &mut mount {
             // Modify never provisions named volumes; the volume must already exist,
             // which `mount_source_conflicts` checks before anything is stopped.
+            // Dropping creation settings would lose them silently, so only the
+            // default intent that plain named mounts carry is accepted.
+            if create
+                .as_ref()
+                .is_some_and(|create| !only_ensures_volume_exists(create))
+            {
+                return Err(format!(
+                    "{guest}: modify does not create or configure named volumes; create the volume first"
+                ));
+            }
             *create = None;
         }
         if matches!(mount, VolumeMount::Owned { .. }) {
@@ -2697,6 +2709,16 @@ fn resolve_mount_patch(
         super::validate_volume_mounts(&mut mounts).map_err(|error| error.to_string())?;
     }
     Ok((mounts, deltas))
+}
+
+/// Whether `create` only asks for the volume to exist, with no settings of its own. The CLI
+/// attaches this to every named volume mount it parses.
+fn only_ensures_volume_exists(create: &NamedVolumeCreate) -> bool {
+    create.mode == NamedVolumeMode::EnsureExists
+        && create.kind == VolumeKind::Directory
+        && create.quota_mib.is_none()
+        && create.capacity_mib.is_none()
+        && create.labels.is_empty()
 }
 
 fn guest_of(mount: &mut VolumeMount) -> &mut String {
@@ -3654,6 +3676,7 @@ mod tests {
     #[cfg(unix)]
     use crate::config::{GlobalConfig, PathsConfig};
     use crate::sandbox::MountBuilder;
+    use crate::sandbox::types::NamedVolumeBuilder;
     use crate::size::SizeExt;
     #[cfg(unix)]
     use crate::test_support;
@@ -5934,6 +5957,63 @@ mod tests {
             .named(volume)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn named_mounts_accept_only_the_default_creation_intent() {
+        let config = config_with_mounts(Vec::new());
+        let named_with = |configure: fn(NamedVolumeBuilder) -> NamedVolumeBuilder| {
+            MountBuilder::new("/vol")
+                .named_with("data", configure)
+                .build()
+                .unwrap()
+        };
+        let plain = [
+            named_mount("/vol", "data"),
+            named_with(|volume| volume.ensure_exists()),
+        ];
+        let configured = [
+            named_with(|volume| volume.create()),
+            named_with(|volume| volume.ensure_exists().quota(64)),
+            named_with(|volume| volume.ensure_exists().disk().size(64)),
+            named_with(|volume| volume.ensure_exists().label("team", "data")),
+        ];
+
+        for mount in plain {
+            let patch = SandboxModificationPatch {
+                mounts: vec![mount],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+            assert_eq!(plan.changes.len(), 1);
+        }
+        for mount in configured {
+            let patch = SandboxModificationPatch {
+                mounts: vec![mount],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+            assert_eq!(
+                plan.conflicts[0].message,
+                "/vol: modify does not create or configure named volumes; create the volume first"
+            );
+        }
     }
 
     #[test]

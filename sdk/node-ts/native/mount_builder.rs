@@ -593,7 +593,7 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
 impl JsBuiltVolumeMount {
     /// Rebuild the core mount through the same builder validation as `MountBuilder`.
     ///
-    /// Named volume creation intent is dropped: `modify` never provisions volumes.
+    /// Named volume creation settings are kept, so `modify` can refuse those it cannot apply.
     pub(crate) fn into_core(self) -> Result<RustVolumeMount> {
         let missing = |field: &str| {
             napi::Error::from_reason(format!("{} mount requires `{field}`", self.kind))
@@ -604,7 +604,13 @@ impl JsBuiltVolumeMount {
                 builder.bind(self.host.clone().ok_or_else(|| missing("host"))?);
             }
             "named" => {
-                builder.named(self.name.clone().ok_or_else(|| missing("name"))?);
+                builder.named_with(
+                    self.name.clone().ok_or_else(|| missing("name"))?,
+                    self.named_mode.clone(),
+                    self.named_kind.clone(),
+                    self.size_mib,
+                    self.quota_mib,
+                )?;
             }
             "owned" => {
                 let previous = builder.take_inner();
@@ -636,8 +642,8 @@ impl JsBuiltVolumeMount {
             }
         }
         // Apply every supplied option and let the core builder reject those that do not fit the
-        // kind, as create does. Named volumes carry provisioning metadata in `size_mib` and
-        // `quota_mib`, which modify never uses; owned mounts consumed theirs above.
+        // kind, as create does. Named and owned mounts consumed `size_mib` and `quota_mib` above
+        // as storage settings.
         if !matches!(self.kind.as_str(), "named" | "owned") {
             if let Some(size) = self.size_mib {
                 builder.size(f64::from(size))?;
@@ -851,10 +857,12 @@ mod tests {
         mount.stat_virtualization = Some("strict".into());
         assert!(mount.into_core().is_err());
 
-        // Named volume provisioning metadata is ignored.
+        // Named volume creation settings reach the core, which refuses them in a modification.
         let mut named = built(RustMountBuilder::new("/data").named("shared"));
-        named.size_mib = Some(64);
+        named.named_mode = Some("ensure-exists".into());
         named.quota_mib = Some(64);
-        assert!(named.into_core().is_ok());
+        let rebuilt = named.into_core().unwrap();
+        let quota_mib = rebuilt.named_create().and_then(|create| create.quota_mib());
+        assert_eq!(quota_mib, Some(64));
     }
 }

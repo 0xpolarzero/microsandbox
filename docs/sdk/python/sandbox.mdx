@@ -727,7 +727,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>mounts</code><span className="msb-type">Mapping[str, MountConfig] | None</span></div>
-    <div className="msb-param-desc">Mounts to add keyed by guest path; replaces a mount at the same path. Named volumes must already exist and owned mounts are rejected. Applies on restart or next start.</div>
+    <div className="msb-param-desc">Mounts to add keyed by guest path; replaces a mount at the same path. Named volumes must already exist, so creation settings such as a quota are rejected, as are owned mounts. Applies on restart or next start.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>mounts_rm</code><span className="msb-type">list[str] | None</span></div>

@@ -2333,7 +2333,7 @@ Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatc
 fn mount(self, mount: VolumeMount) -> Self
 ```
 
-Add a volume mount, or replace the mount already at its guest path. Mounts are fixed when the VM boots, so a running sandbox needs [`next_start()`](#modification-next_start) or [`restart()`](#modification-restart). Private (owned) volumes cannot be added, and an existing one cannot be replaced.
+Add a volume mount, or replace the mount already at its guest path. Mounts are fixed when the VM boots, so a running sandbox needs [`next_start()`](#modification-next_start) or [`restart()`](#modification-restart). A named volume must already exist, so creation settings such as a quota are rejected. Private (owned) volumes cannot be added, and an existing one cannot be replaced.
 
 <p className="msb-label">Parameters</p>
 

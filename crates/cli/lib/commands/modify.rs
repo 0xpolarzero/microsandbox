@@ -794,6 +794,7 @@ impl BlockerLine {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use microsandbox_types::{NamedVolumeMode, VolumeKind};
 
     use super::*;
 
@@ -938,6 +939,24 @@ mod tests {
             microsandbox::sandbox::VolumeMount::Bind { host, options, .. }
                 if host == dir && options.readonly
         ));
+    }
+
+    #[test]
+    fn named_volume_flag_carries_only_the_default_creation_intent() {
+        let (_, plain) = common::volume_mount("data:/vol").unwrap();
+        let (_, with_quota) = common::volume_mount("data:/vol:quota=64").unwrap();
+
+        let plain = plain.build().unwrap();
+        let with_quota = with_quota.build().unwrap();
+        let plain_create = plain.named_create().unwrap();
+        let quota_create = with_quota.named_create().unwrap();
+
+        assert_eq!(plain_create.mode, NamedVolumeMode::EnsureExists);
+        assert_eq!(plain_create.kind, VolumeKind::Directory);
+        assert_eq!(plain_create.quota_mib, None);
+        assert_eq!(plain_create.capacity_mib, None);
+        assert!(plain_create.labels.is_empty());
+        assert_eq!(quota_create.quota_mib, Some(64));
     }
 
     #[test]

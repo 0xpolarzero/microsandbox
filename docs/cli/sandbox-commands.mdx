@@ -534,7 +534,7 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
-| `--volume` | Add a mount (`SOURCE:DEST[:OPTIONS]`, same syntax as create). A mount at a guest path that already has one replaces it. Restart-backed |
+| `--volume` | Add a mount (`SOURCE:DEST[:OPTIONS]`, same syntax as create). A mount at a guest path that already has one replaces it. A named volume must already exist, so `quota=` is rejected for it. Restart-backed |
 | `--volume-rm` | Remove the mount at a guest path. Restart-backed. Private volumes (`--mount-owned`) cannot be added or removed |
 | `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
 | `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |

@@ -386,7 +386,8 @@ func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error)
 }
 
 // buildModifyMount converts one MountConfig into the core VolumeMount shape.
-// Named volume creation settings are ignored: modify never provisions volumes.
+// Modify never provisions volumes, so a named mount that carries creation
+// settings is refused rather than silently losing them.
 func buildModifyMount(guest string, mount MountConfig) (modifyMount, error) {
 	entry := modifyMount{
 		Guest: guest,
@@ -403,6 +404,9 @@ func buildModifyMount(guest string, mount MountConfig) (modifyMount, error) {
 	}
 	if bad := inapplicableMountOptions(mount); len(bad) > 0 {
 		return modifyMount{}, fmt.Errorf("mount %q: %s not valid for this kind of mount", guest, strings.Join(bad, ", "))
+	}
+	if configuresNamedVolume(mount) {
+		return modifyMount{}, fmt.Errorf("mount %q: modify does not create or configure named volumes; create the volume first", guest)
 	}
 	switch mount.Kind() {
 	case MountKindBind:
@@ -428,9 +432,18 @@ func buildModifyMount(guest string, mount MountConfig) (modifyMount, error) {
 	return entry, nil
 }
 
+// configuresNamedVolume reports whether a named mount asks for more than an
+// existing volume: a create mode, disk storage, a size, or a quota.
+func configuresNamedVolume(mount MountConfig) bool {
+	if mount.Kind() != MountKindNamed {
+		return false
+	}
+	return mount.NamedMode == "create" || mount.NamedKind == "disk" || mount.SizeMiB != 0 || mount.QuotaMiB != 0
+}
+
 // inapplicableMountOptions lists options unsupported by the mount kind.
 // Named-volume provisioning settings (NamedMode, NamedKind, SizeMiB,
-// QuotaMiB) are ignored because modify does not provision volumes.
+// QuotaMiB) are checked by configuresNamedVolume instead.
 func inapplicableMountOptions(mount MountConfig) []string {
 	kind := mount.Kind()
 	virtiofs := kind == MountKindBind || kind == MountKindNamed

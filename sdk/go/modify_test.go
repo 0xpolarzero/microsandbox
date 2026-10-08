@@ -403,10 +403,33 @@ func TestModifyRequestRejectsOptionsThatDoNotFitTheMountKind(t *testing.T) {
 		}
 	}
 
-	// Named volume provisioning settings are ignored, not rejected.
-	named := MountConfig{kind: MountKindNamed, Named: "v", NamedMode: "create", NamedKind: "dir", QuotaMiB: 64, SizeMiB: 64}
-	if _, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": named}}); err != nil {
-		t.Fatalf("named provisioning settings: %v", err)
+}
+
+func TestModifyRequestAcceptsOnlyPlainNamedMounts(t *testing.T) {
+	plain := map[string]MountConfig{
+		"factory":       Mount.Named("v", MountOptions{}),
+		"existing":      Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "existing", Kind: "dir"}),
+		"ensure-exists": Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "ensure-exists"}),
+	}
+	configured := map[string]MountConfig{
+		"create": Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "create"}),
+		"disk":   Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Kind: "disk", SizeMiB: 64}),
+		"quota":  Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{QuotaMiB: 64}),
+	}
+
+	for name, mount := range plain {
+		_, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": mount}})
+
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mount := range configured {
+		_, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": mount}})
+
+		if err == nil || !strings.Contains(err.Error(), "modify does not create or configure named volumes") {
+			t.Errorf("%s: expected a refusal; got %v", name, err)
+		}
 	}
 }
 

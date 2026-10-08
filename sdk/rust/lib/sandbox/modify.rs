@@ -7,6 +7,7 @@ use microsandbox_types::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
+use crate::backend::local::host_paths;
 use crate::backend::{Backend, ControlSession, sandbox::SandboxIdentity};
 use crate::db::entity::{
     sandbox as sandbox_entity, sandbox_label as sandbox_label_entity, volume as volume_entity,
@@ -313,7 +314,7 @@ impl SandboxModificationBuilder {
             self.policy,
         );
         plan.conflicts
-            .extend(mount_source_conflicts(&self.backend, &self.patch).await?);
+            .extend(mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?);
         Ok(plan)
     }
 
@@ -367,7 +368,7 @@ impl SandboxModificationBuilder {
         );
         // Check mount sources before a restart-backed apply stops the VM.
         plan.conflicts
-            .extend(mount_source_conflicts(&self.backend, &self.patch).await?);
+            .extend(mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?);
 
         validate_apply_supported(&plan)?;
         let restart_required = plan_requires_restart(&plan) && running_status(status);
@@ -2615,12 +2616,13 @@ async fn lock_named_volumes(
     crate::runtime::ensure_named_volumes(local, &config.clone_for_persistence()).await
 }
 
-/// Reject added mounts whose source is already missing, so a restart-backed
-/// apply does not stop the VM only to fail its start. Bind paths and disk
-/// images the host deletes later are an inherent race; named volumes are
-/// locked separately. Local backend only.
+/// Reject added mounts whose source is already missing, or whose bind root goes
+/// through a symlink the runtime would refuse, so a restart-backed apply does not
+/// stop the VM only to fail its start. Bind paths and disk images the host changes
+/// later are an inherent race; named volumes are locked separately. Local backend only.
 async fn mount_source_conflicts(
     backend: &Arc<dyn Backend>,
+    current: &[VolumeMount],
     patch: &SandboxModificationPatch,
 ) -> MicrosandboxResult<Vec<ModificationConflict>> {
     let mut conflicts = Vec::new();
@@ -2656,7 +2658,54 @@ async fn mount_source_conflicts(
             });
         }
     }
+
+    let changed_binds = changed_bind_mounts(current, patch);
+    if changed_binds.is_empty()
+        || !host_paths::runtime_refuses_symlinked_bind_roots(local.config()).await?
+    {
+        return Ok(conflicts);
+    }
+
+    for mount in changed_binds {
+        let guest = mount.guest().to_string();
+        let mut config = SandboxConfig::default();
+        config.spec.mounts = vec![mount];
+
+        match host_paths::check_bind_roots_do_not_follow_symlinks(&config) {
+            Ok(()) => {}
+            Err(MicrosandboxError::InvalidConfig(message)) => {
+                conflicts.push(ModificationConflict {
+                    field: MOUNT_FIELD.to_string(),
+                    message: format!("{guest}: {message}"),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
     Ok(conflicts)
+}
+
+/// Bind mounts the patch adds or replaces. Mounts it leaves unchanged keep their
+/// saved behavior and are not checked again. An invalid patch yields none; planning
+/// already reports why.
+fn changed_bind_mounts(
+    current: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> Vec<VolumeMount> {
+    let Ok((mounts, _)) = resolve_mount_patch(current, patch) else {
+        return Vec::new();
+    };
+    let current_forms: Vec<_> = current.iter().map(mount_json).collect();
+
+    let mut changed = Vec::new();
+    for mount in mounts {
+        let is_bind = matches!(mount, VolumeMount::Bind { .. });
+        if is_bind && !current_forms.contains(&mount_json(&mount)) {
+            changed.push(mount);
+        }
+    }
+    changed
 }
 
 /// Apply mount additions and removals to the desired configuration.
@@ -3248,12 +3297,22 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    #[cfg(unix)]
+    use std::path::Path;
+
     use sea_orm::ActiveModelTrait;
     use tempfile::tempdir;
 
     use super::*;
     use crate::backend::LocalBackend;
+    #[cfg(unix)]
+    use crate::config::{GlobalConfig, PathsConfig};
+    use crate::sandbox::MountBuilder;
     use crate::size::SizeExt;
+    #[cfg(unix)]
+    use crate::test_support;
 
     #[test]
     fn guest_flush_capability_never_silently_weakens_capture() {
@@ -5579,6 +5638,147 @@ mod tests {
             .unwrap();
         assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
         assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    /// A local backend whose runtime reports `msb 0.6.{patch}`; nothing is ever launched.
+    #[cfg(unix)]
+    async fn backend_with_runtime(root: &Path, patch: u8) -> Arc<dyn Backend> {
+        let msb = root.join("msb");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'msb 0.6.{patch}'; else exit 99; fi\n"
+        );
+        std::fs::write(&msb, script).unwrap();
+        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let firmware = root.join("firmware");
+        std::fs::write(&firmware, b"not launched").unwrap();
+
+        let local = test_support::local_backend(GlobalConfig {
+            home: Some(root.join("home")),
+            paths: PathsConfig {
+                msb: Some(msb),
+                libkrunfw: Some(firmware),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        local.db().await.unwrap();
+        Arc::new(local)
+    }
+
+    #[cfg(unix)]
+    async fn insert_stopped_sandbox(backend: &Arc<dyn Backend>, config: &SandboxConfig) {
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        sandbox_entity::ActiveModel {
+            name: Set(config.spec.name.clone()),
+            config: Set(serde_json::to_string(config).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_roots_through_symlinks_are_refused_and_keep_the_config() {
+        let temp = tempdir().unwrap();
+        // macOS temp directories sit under the symlinked /var: start from the resolved path.
+        let base = temp.path().canonicalize().unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        let link = base.join("link");
+        symlink(&real, &link).unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_stopped_sandbox(&backend, &current).await;
+        let patch = SandboxModificationPatch {
+            mounts: vec![
+                bind_mount("/root", link.to_str().unwrap(), false),
+                bind_mount("/parent", link.join("child").to_str().unwrap(), false),
+            ],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+
+        let messages: Vec<_> = plan
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].starts_with("/parent: ") && messages[0].contains("goes through symlink"),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].starts_with("/root: ") && messages[1].contains("is a symlink"),
+            "{messages:?}"
+        );
+        assert!(error.contains("goes through symlink"), "{error}");
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_roots_that_avoid_or_opt_into_symlinks_are_accepted() {
+        let temp = tempdir().unwrap();
+        // macOS temp directories sit under the symlinked /var: start from the resolved path.
+        let base = temp.path().canonicalize().unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        symlink(&real, &link).unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        // A saved mount is not checked again when the patch repeats it unchanged.
+        let saved = bind_mount("/saved", link.to_str().unwrap(), false);
+        let current = config_with_mounts(vec![saved.clone()]);
+        insert_stopped_sandbox(&backend, &current).await;
+        let follow = MountBuilder::new("/follow")
+            .bind(&link)
+            .follow_root_symlinks(true)
+            .build()
+            .unwrap();
+        let resolved = bind_mount("/resolved", real.to_str().unwrap(), false);
+        let patch = SandboxModificationPatch {
+            mounts: vec![saved, follow, resolved],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        builder().apply().await.unwrap();
+
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+        let persisted = handle.config().unwrap();
+        let mut guests = mount_guests(&persisted);
+        guests.sort();
+        assert_eq!(guests, vec!["/follow", "/resolved", "/saved"]);
     }
 
     #[test]

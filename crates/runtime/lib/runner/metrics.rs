@@ -112,7 +112,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
-    let mut previous = paired_snapshot(&krun_metrics, &vm_control);
+    let mut previous = paired_snapshot(&krun_metrics, &vm_control).await;
     let upper_host_path = upper_host_path.as_deref();
     let mut last_cpu_percent: Option<f32> = None;
 
@@ -142,7 +142,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     loop {
         tokio::time::sleep(interval).await;
 
-        let current = paired_snapshot(&krun_metrics, &vm_control);
+        let current = paired_snapshot(&krun_metrics, &vm_control).await;
         let wall_secs = current
             .at
             .checked_duration_since(previous.at)
@@ -217,7 +217,7 @@ struct PairedSnapshot {
     uncertainty: Duration,
 }
 
-fn paired_snapshot(
+async fn paired_snapshot(
     krun_metrics: &msb_krun::MetricsHandle,
     vm_control: &msb_krun::VmControl,
 ) -> PairedSnapshot {
@@ -228,6 +228,22 @@ fn paired_snapshot(
         vm_control.execution_state(),
         Some(msb_krun::VmExecutionState::Paused(_))
     );
+    snapshot_off_worker(krun_metrics, paused).await
+}
+
+/// Takes the snapshot on the blocking pool: the residency scan can take hundreds of
+/// milliseconds on a large guest, and the runtime's few workers carry the agent relays.
+async fn snapshot_off_worker(
+    krun_metrics: &msb_krun::MetricsHandle,
+    paused: bool,
+) -> PairedSnapshot {
+    let krun_metrics = krun_metrics.clone();
+    tokio::task::spawn_blocking(move || snapshot(&krun_metrics, paused))
+        .await
+        .expect("metrics snapshot task panicked")
+}
+
+fn snapshot(krun_metrics: &msb_krun::MetricsHandle, paused: bool) -> PairedSnapshot {
     let before = Instant::now();
     let metrics = if paused {
         krun_metrics.aggregate_snapshot_without_host_residency()
@@ -421,6 +437,7 @@ mod tests {
 
     use super::*;
     use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReserveSlot};
+    use msb_krun_utils::metrics::MetricsWriter;
 
     fn unique_shm_name(tag: &str) -> String {
         let nanos = std::time::SystemTime::now()
@@ -818,5 +835,22 @@ mod tests {
             upper_filesystem_stale_after(Duration::from_secs(10)),
             Duration::from_secs(30)
         );
+    }
+
+    #[tokio::test]
+    async fn residency_sampling_runs_off_the_async_executor_thread() {
+        let (sampling_thread, sampled_thread) = std::sync::mpsc::channel();
+        let writer = MetricsWriter::default();
+        writer.set_memory_host_resident_sampler(move || {
+            sampling_thread.send(std::thread::current().id()).unwrap();
+            Some(0)
+        });
+        let krun_metrics = writer.handle();
+        let executor_thread = std::thread::current().id();
+
+        let snapshot = snapshot_off_worker(&krun_metrics, false).await;
+
+        assert_ne!(sampled_thread.try_recv().unwrap(), executor_thread);
+        assert_eq!(snapshot.metrics.memory.host_resident_bytes, Some(0));
     }
 }

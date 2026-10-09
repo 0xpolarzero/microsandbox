@@ -4232,6 +4232,7 @@ dependencies = [
  "microsandbox-utils",
  "microsandbox-vsock",
  "msb_krun",
+ "msb_krun_utils",
  "nix 0.31.3",
  "rand 0.10.3",
  "rustls",

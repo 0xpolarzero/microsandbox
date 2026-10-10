@@ -71,6 +71,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::exec_control::{ExecControlConnection, ExecControlLease, ExecControlRegistry};
+use super::finished_ids::FinishedIds;
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
 use crate::boot_error::BootError;
 use crate::checkpoint::RestoredAgentState;
@@ -457,7 +458,7 @@ struct GuestMergeFlow {
 struct GuestFrameMerger {
     flows: HashMap<(ClientIncarnation, u32), GuestMergeFlow>,
     /// Compact owner-local bitmaps remember retired IDs without one allocation per operation.
-    retired: HashMap<ClientIncarnation, Vec<u64>>,
+    retired: HashMap<ClientIncarnation, FinishedIds>,
 }
 
 /// The agent relay running in the sandbox process.
@@ -878,12 +879,25 @@ impl GuestFrameMerger {
                 if finish.flow != BulkFlow::GuestToHost {
                     return Ok(vec![lane_frame]);
                 }
-                let flow = self.flows.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Custom(format!(
-                        "bulk finish arrived before acceptance for correlation {}",
-                        message.id
-                    ))
-                })?;
+
+                let Some(flow) = self.flows.get_mut(&key) else {
+                    return if self.is_retired(incarnation, message.id) {
+                        Ok(Vec::new())
+                    } else {
+                        Err(RuntimeError::Custom(format!(
+                            "bulk finish for unregistered correlation {}",
+                            message.id
+                        )))
+                    };
+                };
+
+                // A cancelled flow has already released its records, so this finish can never be
+                // drained. Discard it here instead of holding its lane permit until the terminal
+                // response arrives.
+                if flow.cancelling {
+                    return Ok(Vec::new());
+                }
+
                 if !flow.accepted_forwarded || !flow.guest_to_host {
                     return Err(RuntimeError::Custom(format!(
                         "bulk finish arrived for inactive guest-to-host flow {}",
@@ -3212,7 +3226,7 @@ async fn bulk_ring_writer_task(
     };
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
-    let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
+    let mut retired = HashMap::<ClientIncarnation, FinishedIds>::new();
 
     loop {
         let changed = workload.changed.notified();
@@ -3328,7 +3342,7 @@ fn apply_bulk_writer_command(
     command: BulkWriterCommand,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &mut HashMap<ClientIncarnation, FinishedIds>,
 ) -> RuntimeResult<()> {
     match command {
         BulkWriterCommand::Write(write) => enqueue_bulk_write(write, flows, active, retired),
@@ -3361,7 +3375,7 @@ fn enqueue_bulk_write(
     write: BulkWrite,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &HashMap<ClientIncarnation, FinishedIds>,
 ) -> RuntimeResult<()> {
     let flow = write.flow;
     let payload_len = write.payload_len;
@@ -3886,7 +3900,7 @@ async fn route_guest_lane_frame(
         {
             if let Some(connection) = client.exec_control.as_ref() {
                 if is_terminal {
-                    connection.retire(frame.id);
+                    connection.mark_finished(frame.id);
                 } else if frame.flags != FLAG_BULK
                     && connection.pending(frame.id)
                     && decode_frame(frame.data.as_ref())
@@ -4620,6 +4634,15 @@ async fn client_reader_task(
                 break;
             };
             response.v = request.v;
+            if message_type == Some(MessageType::ExecRequest) {
+                let map = clients.lock().await;
+                if let Some(connection) = map
+                    .get(&slot)
+                    .and_then(|client| client.exec_control.as_ref())
+                {
+                    connection.mark_finished(frame.id);
+                }
+            }
             if queue_client_rejection(&write_tx, &write_budget, &response).is_err() {
                 break;
             }
@@ -5309,46 +5332,37 @@ fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: 
     is_shutdown_control || (id >= id_start && id < id_end_exclusive)
 }
 
-/// Locate one correlation in an owner-local retirement bitmap.
-fn relay_retired_bit(id: u32) -> Option<(usize, u64)> {
-    let slot = relay_client_slot(id)?;
-    let (id_start, _) = relay_client_id_range(slot)?;
-    let local = usize::try_from(id.checked_sub(id_start)?).ok()?;
-    Some((
-        local / u64::BITS as usize,
-        1u64 << (local % u64::BITS as usize),
-    ))
-}
-
-/// Test an owner-local retirement bitmap without allocating on a read.
+/// Check whether an operation has finished on its owning connection.
 fn relay_correlation_is_retired(
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &HashMap<ClientIncarnation, FinishedIds>,
     incarnation: ClientIncarnation,
     id: u32,
 ) -> bool {
-    let Some((word, mask)) = relay_retired_bit(id) else {
-        return false;
-    };
     retired
         .get(&incarnation)
-        .and_then(|bitmap| bitmap.get(word))
-        .is_some_and(|bits| bits & mask != 0)
+        .is_some_and(|finished| finished.is_finished(id))
 }
 
-/// Retire one ID in a compact bitmap bounded by the canonical per-client range size.
+/// Remember a finished operation within its owner's assigned ID range.
 fn retire_relay_correlation(
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &mut HashMap<ClientIncarnation, FinishedIds>,
     incarnation: ClientIncarnation,
     id: u32,
 ) -> RuntimeResult<()> {
-    let (word, mask) = relay_retired_bit(id).ok_or_else(|| {
-        RuntimeError::Custom(format!("cannot retire unassigned correlation {id}"))
-    })?;
-    let bitmap = retired.entry(incarnation).or_default();
-    if bitmap.len() <= word {
-        bitmap.resize(word + 1, 0);
+    let (start, end) = relay_client_slot(id)
+        .and_then(relay_client_id_range)
+        .ok_or_else(|| {
+            RuntimeError::Custom(format!("cannot retire unassigned correlation {id}"))
+        })?;
+
+    let finished = retired
+        .entry(incarnation)
+        .or_insert_with(|| FinishedIds::new(start..end));
+    if !finished.mark_finished(id) {
+        return Err(RuntimeError::Custom(format!(
+            "correlation {id} is outside its owning connection's range"
+        )));
     }
-    bitmap[word] |= mask;
     Ok(())
 }
 
@@ -5453,6 +5467,143 @@ mod tests {
         assert!(task.await.unwrap().delivered);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn exec_control_timeout_reports_whether_the_signal_was_queued() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+
+        for (started, full) in [(false, false), (true, true), (true, false)] {
+            let (tx, mut rx) = ControlWriter::new();
+            let owner = tx.exec_controls.connect(100, 200);
+            owner.register(101);
+            if started {
+                owner.started(101);
+            }
+            if full {
+                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                    tx.send(ControlWrite::ordinary(
+                        Bytes::from_static(b"control"),
+                        102,
+                        false,
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+            let response = tx
+                .exec_controls
+                .signal(
+                    &tx,
+                    ExecControlRequest {
+                        version: 1,
+                        connection: owner.token(),
+                        id: 101,
+                        signal: 9,
+                    },
+                )
+                .await;
+            assert_eq!(response.error_code.as_deref(), Some("delivery_unconfirmed"));
+            let queued = started && !full;
+            let message = response.error.unwrap();
+            if queued {
+                assert!(message.contains("may still be delivered"), "{message}");
+            } else {
+                assert!(message.contains("was not queued"), "{message}");
+            }
+            if full {
+                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                    assert!(rx.try_recv().is_ok());
+                }
+            }
+            assert_eq!(rx.try_recv().is_ok(), queued);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exec_control_rejects_signals_after_completion_without_waiting() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+
+        let (tx, mut rx) = ControlWriter::new();
+        let owner = tx.exec_controls.connect(100, 200);
+        // Include failed starts and exits, with out-of-order IDs across the assigned range.
+        for (id, started) in [(199, true), (100, false), (164, true), (163, false)] {
+            owner.register(id);
+            if started {
+                owner.started(id);
+            }
+            owner.mark_finished(id);
+        }
+
+        for id in [100, 163, 164, 199] {
+            let before = tokio::time::Instant::now();
+            let response = tx
+                .exec_controls
+                .signal(
+                    &tx,
+                    ExecControlRequest {
+                        version: 1,
+                        connection: owner.token(),
+                        id,
+                        signal: 9,
+                    },
+                )
+                .await;
+            assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+            assert_eq!(response.error.as_deref(), Some("execution has ended"));
+            assert_eq!(tokio::time::Instant::now(), before);
+            assert!(!response.delivered);
+        }
+        assert!(rx.try_recv().is_err());
+
+        // A lower unused ID must still wait for registration, even after higher IDs finished.
+        let task = tokio::spawn({
+            let tx = tx.clone();
+            let token = owner.token();
+            async move {
+                tx.exec_controls
+                    .signal(
+                        &tx,
+                        ExecControlRequest {
+                            version: 1,
+                            connection: token,
+                            id: 101,
+                            signal: 9,
+                        },
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        let before = tokio::time::Instant::now();
+        owner.register(101);
+        // Finish before the waiting signal task can observe the lease at all.
+        owner.mark_finished(101);
+        let response = task.await.unwrap();
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert!(rx.try_recv().is_err());
+
+        // A stale handle must not regain authority if its finished ID is submitted again.
+        owner.register(101);
+        owner.started(101);
+        let response = tx
+            .exec_controls
+            .signal(
+                &tx,
+                ExecControlRequest {
+                    version: 1,
+                    connection: owner.token(),
+                    id: 101,
+                    signal: 9,
+                },
+            )
+            .await;
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn exec_control_revokes_queued_signals_and_rejects_reused_slots() {
         use microsandbox_protocol::exec_control::ExecControlRequest;
@@ -5478,7 +5629,7 @@ mod tests {
             }
         });
         let write = rx.recv().await.unwrap();
-        owner.retire(101);
+        owner.mark_finished(101);
         let shared = workload_test_shared(4096, false);
         let mut pending = VecDeque::from([write]);
         assert!(
@@ -5596,6 +5747,7 @@ mod tests {
     };
     use microsandbox_protocol::core::Ready;
     use microsandbox_protocol::fs::FsResponse;
+    use microsandbox_protocol::tcp::TcpClosed;
     use microsandbox_protocol::transport::{
         BulkTransportReady, RelayLeaseReady, decode_bulk_ack, encode_bulk_hello,
     };
@@ -6093,6 +6245,34 @@ mod tests {
         }
     }
 
+    fn tcp_guest_raw(id: u32, offset: u64, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        codec::encode_bulk_to_buf(
+            &BulkRecord {
+                id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                offset,
+                payload: Bytes::copy_from_slice(payload),
+            },
+            &mut frame,
+        )
+        .unwrap();
+        frame
+    }
+
+    fn guest_finish(kind: BulkKind, id: u32, final_offset: u64) -> Vec<u8> {
+        encoded_message_id(
+            MessageType::BulkFinish,
+            id,
+            &BulkFinish {
+                kind,
+                flow: BulkFlow::GuestToHost,
+                final_offset,
+            },
+        )
+    }
+
     fn bulk_accepted() -> BulkAccepted {
         BulkAccepted {
             kind: BulkKind::Filesystem,
@@ -6223,10 +6403,13 @@ mod tests {
         let (disconnect_tx, disconnect_rx) = watch::channel(false);
         let write_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
         let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let owner = agent_tx.exec_controls.connect(id_start, id_end_exclusive);
+        let token = owner.token();
+        let signal_writer = agent_tx.clone();
         let clients = Arc::new(Mutex::new(HashMap::from([(
             slot,
             ClientState {
-                exec_control: None,
+                exec_control: Some(owner),
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6291,6 +6474,22 @@ mod tests {
             drop(rejected);
             assert_eq!(write_budget.available_permits(), initial_budget);
         }
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            signal_writer.exec_controls.signal(
+                &signal_writer,
+                microsandbox_protocol::exec_control::ExecControlRequest {
+                    version: 1,
+                    connection: token,
+                    id: id_start,
+                    signal: 9,
+                },
+            ),
+        )
+        .await
+        .expect("host-rejected executions must reject signals immediately");
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert!(agent_rx.try_recv().is_err());
         // Existing streams still enter bounded source-owned admission while paused. Classification
         // reuses this reader's already decoded envelope, including empty stdin/TCP EOF payloads.
         for (kind, uses_data_credit) in [
@@ -6628,6 +6827,202 @@ mod tests {
     }
 
     #[test]
+    fn issue1801_retired_tcp_finish_is_discarded() {
+        const ID: u32 = 15;
+
+        // An ordinary close answers with `TcpClosed` and a cancelled stream with `TcpFailed`.
+        // Either terminal retires the correlation, so a finish the guest had already queued must
+        // be discarded instead of failing the relay shared by every client.
+        for terminal in [
+            encoded_message_id(MessageType::TcpClosed, ID, &TcpClosed {}),
+            encoded_message_id(
+                MessageType::TcpFailed,
+                ID,
+                &TcpFailed {
+                    error: "cancelled".into(),
+                },
+            ),
+        ] {
+            let budget = Arc::new(Semaphore::new(64 * 1024));
+            let full_budget = budget.available_permits();
+            let mut merger = GuestFrameMerger::default();
+            merger.register(TEST_INCARNATION, ID).unwrap();
+
+            let accepted = merger
+                .push(lane_frame(
+                    encoded_message_id(
+                        MessageType::BulkAccepted,
+                        ID,
+                        &BulkAccepted {
+                            kind: BulkKind::Tcp,
+                            ..bulk_accepted()
+                        },
+                    ),
+                    &budget,
+                ))
+                .unwrap();
+            assert_eq!(accepted.len(), 1);
+            drop(accepted);
+
+            merger.drop_flow(TEST_INCARNATION, ID);
+            let forwarded = merger.push(lane_frame(terminal, &budget)).unwrap();
+            assert_eq!(forwarded.len(), 1);
+            drop(forwarded);
+            assert!(!merger.flows.contains_key(&(TEST_INCARNATION, ID)));
+
+            let late_finish = merger
+                .push(lane_frame(guest_finish(BulkKind::Tcp, ID, 0), &budget))
+                .expect("a finish for a retired correlation must not fail the relay");
+
+            assert!(late_finish.is_empty());
+            assert_eq!(budget.available_permits(), full_budget);
+        }
+    }
+
+    #[test]
+    fn guest_merger_discards_finish_while_cancelling() {
+        let id = 71;
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let full_budget = budget.available_permits();
+        let mut merger = GuestFrameMerger::default();
+        merger.register(TEST_INCARNATION, id).unwrap();
+        let accepted = merger
+            .push(lane_frame(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+            ))
+            .unwrap();
+        assert_eq!(accepted.len(), 1);
+        drop(accepted);
+
+        // The finish arrives between cancellation and the terminal that retires the correlation.
+        merger.drop_flow(TEST_INCARNATION, id);
+        let discarded = merger
+            .push(lane_frame(guest_finish(BulkKind::Tcp, id, 4), &budget))
+            .expect("a finish for a cancelling flow must not fail the relay");
+
+        assert!(discarded.is_empty());
+        // A retained `pending_finish` would keep holding this frame's admission permit.
+        assert_eq!(budget.available_permits(), full_budget);
+
+        let forwarded = merger
+            .push(lane_frame(
+                encoded_message_id(
+                    MessageType::TcpFailed,
+                    id,
+                    &TcpFailed {
+                        error: "cancelled".into(),
+                    },
+                ),
+                &budget,
+            ))
+            .unwrap();
+
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(
+            decode_frame(forwarded[0].frame.data.as_ref()).unwrap().t,
+            MessageType::TcpFailed
+        );
+        assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
+    }
+
+    #[test]
+    fn guest_merger_scopes_retired_finishes_to_one_incarnation() {
+        let id = 73;
+        let old = [0x33; CLIENT_INCARNATION_SIZE];
+        let new = [0x44; CLIENT_INCARNATION_SIZE];
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let mut merger = GuestFrameMerger::default();
+        merger.register(old, id).unwrap();
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+                old,
+            ))
+            .unwrap();
+        merger.drop_flow(old, id);
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(MessageType::TcpClosed, id, &TcpClosed {}),
+                &budget,
+                old,
+            ))
+            .unwrap();
+
+        // The other owner never registered this correlation, so its finish stays a protocol error.
+        let error = merger
+            .push(lane_frame_with_incarnation(
+                guest_finish(BulkKind::Tcp, id, 0),
+                &budget,
+                new,
+            ))
+            .err()
+            .expect("an unregistered correlation must not inherit another owner's retirement");
+        assert!(
+            error
+                .to_string()
+                .contains("bulk finish for unregistered correlation"),
+            "unexpected error: {error}"
+        );
+
+        // Neither may the retirement relax offset validation for the other owner's live transfer.
+        merger.register(new, id).unwrap();
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+                new,
+            ))
+            .unwrap();
+        let forwarded = merger
+            .push(lane_frame_with_incarnation(
+                tcp_guest_raw(id, 0, b"abc"),
+                &budget,
+                new,
+            ))
+            .unwrap();
+        assert_eq!(forwarded.len(), 1);
+
+        let error = merger
+            .push(lane_frame_with_incarnation(
+                guest_finish(BulkKind::Tcp, id, 0),
+                &budget,
+                new,
+            ))
+            .err()
+            .expect("a finish behind the forwarded offset must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("regressed behind forwarded offset"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn guest_merger_cancel_releases_data_and_discards_late_raw() {
         let id = 61;
         let budget = Arc::new(Semaphore::new(64 * 1024));
@@ -6726,6 +7121,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            merger
+                .push(lane_frame(
+                    guest_finish(BulkKind::Filesystem, id, 14),
+                    &budget
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(budget.available_permits(), full_budget);
 
         let terminal = merger
             .push(lane_frame(
@@ -6744,6 +7149,18 @@ mod tests {
         assert_eq!(terminal.len(), 1);
         assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
         assert!(merger.register(TEST_INCARNATION, id).is_err());
+        drop(terminal);
+
+        assert!(
+            merger
+                .push(lane_frame(
+                    guest_finish(BulkKind::Filesystem, id, 14),
+                    &budget
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(budget.available_permits(), full_budget);
     }
 
     #[test]

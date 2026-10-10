@@ -1,26 +1,11 @@
 ---
 title: Sandbox
-description: TypeScript SDK - Sandbox API reference
+"og:title": TypeScript SDK Sandbox reference
+description: Create and manage microVM sandboxes with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-## Reuse and restart sandboxes
-
-```typescript
-Sandbox.builder(name).connectOrCreate(): Promise<Sandbox>
-handle.connectOrStart(options?): Promise<Sandbox>
-handle.waitForStatus(status): Promise<SandboxHandle>
-handle.restart(options?): Promise<Sandbox>
-handle.destroy(options?): Promise<void>
-sandbox.id: string
-handle.id: string
-```
-
-Use `connectOrCreate` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver throws `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Forking
 
@@ -62,27 +47,6 @@ allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbox, keyed by sandbox name. See [Metrics](/sandboxes/metrics) for a complete example.
 
 ## Sandbox
-
-### External mount restore
-
-`Sandbox.restore()` leaves host resources unmapped unless explicitly supplied or inherited. `.externalMountPolicy("strict")` validates supplied filesystem bindings; `"relaxed"` accepts supported mismatches without granting access to omitted resources. Inspect `await sandbox.restoreWarnings()` for unmapped paths and accepted mismatches. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for snapshots. Ignoring events does not delay the operation; `awaitSandbox()` supplies the authoritative result.
-
-```typescript
-const creation = await Sandbox.restore("saved")
-  .name("child")
-  .cowMemory()
-  .restoreWithProgress();
-for await (const event of creation) {
-  if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
-}
-const sandbox = await creation.awaitSandbox();
-```
-
-Startup phases report preparing, waiting for RAM backing, preparing RAM backing, reusing backing, syncing, and activating. Totals are absent for indeterminate work. Preparation does not consume the activation timeout. Call `creation.cancel()` to cancel creation, then await its result. `createWithPullProgress()` remains image-only.
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
@@ -917,6 +881,34 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 </Accordion>
 
 Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) - but only if `ownsLifecycle` is `true`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
+
+```typescript
+restoreWarnings(): Promise<ExternalMountWarning[]>
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+#### <span className="msb-hn">guestPath</span>
+
+`string`
+
+Guest-visible mount path.
+
+#### <span className="msb-hn">reason</span>
+
+`string`
+
+Why the resource could not be reconstructed.
+
+#### <span className="msb-hn">staleInodes</span>
+
+`readonly bigint[]`
+
+Permanently invalid captured node IDs; empty when the whole export is unavailable.
 
 ## SandboxBuilder
 
@@ -2723,7 +2715,7 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 snapshot(name)
@@ -2873,24 +2865,113 @@ type LogSource = "stdout" | "stderr" | "output" | "system";
 
 A requested sandbox modification. Omitted fields are left unchanged.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| cpus | `number` | Desired effective vCPU count. Live when within the booted `maxCpus` |
-| maxCpus | `number` | Boot-time maximum possible vCPUs (restart-backed) |
-| memory | `number` | Desired effective guest memory in MiB. Live when within the booted `maxMemory` |
-| maxMemory | `number` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
-| rootDiskSize | `number` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
-| env | `Record<string, string>` | Environment variables to set for future execs |
-| envRemove | `string[]` | Environment variable keys to remove |
-| labels | `Record<string, string>` | Labels to set |
-| labelsRemove | `string[]` | Label keys to remove |
-| workdir | `string` | Working directory for future execs |
-| secrets | `Record<string, SecretModifySpec>` | Desired secret specs keyed by stable secret name |
-| secretsRemove | `string[]` | Secret names to remove explicitly |
-| mounts | `VolumeMount[]` | Mounts to add, built with `MountBuilder`; replaces a mount at the same guest path. Named volumes must already exist, so creation settings such as a quota are rejected, as are owned mounts. Applies on restart or next start |
-| mountsRemove | `string[]` | Guest paths whose mounts are removed; applies on restart or next start |
-| policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
-| dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
+#### <span className="msb-hn">cpus</span>
+
+`number`
+
+Desired effective vCPU count. Live when within the booted `maxCpus`
+
+#### <span className="msb-hn">maxCpus</span>
+
+`number`
+
+Boot-time maximum possible vCPUs (restart-backed)
+
+#### <span className="msb-hn">memory</span>
+
+`number`
+
+Desired effective guest memory in MiB. Live when within the booted `maxMemory`
+
+#### <span className="msb-hn">maxMemory</span>
+
+`number`
+
+Boot-time maximum hotpluggable memory in MiB (restart-backed)
+
+#### <span className="msb-hn">rootDiskSize</span>
+
+`number`
+
+Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start
+
+#### <span className="msb-hn">env</span>
+
+`Record<string, string>`
+
+Environment variables to set for future execs
+
+#### <span className="msb-hn">envRemove</span>
+
+`string[]`
+
+Environment variable keys to remove
+
+#### <span className="msb-hn">ports</span>
+
+`ModifyPort[]`
+
+Add/update `{hostPort, guestPort, hostBind?, protocol?}` mappings; other endpoints stay unchanged
+
+#### <span className="msb-hn">portsRemove</span>
+
+`ModifyPortEndpoint[]`
+
+Remove `{hostPort, hostBind?, protocol?}` endpoints; loopback TCP by default
+
+#### <span className="msb-hn">labels</span>
+
+`Record<string, string>`
+
+Labels to set
+
+#### <span className="msb-hn">labelsRemove</span>
+
+`string[]`
+
+Label keys to remove
+
+#### <span className="msb-hn">workdir</span>
+
+`string`
+
+Working directory for future execs
+
+#### <span className="msb-hn">secrets</span>
+
+`Record<string, SecretModifySpec>`
+
+Desired secret specs keyed by stable secret name
+
+#### <span className="msb-hn">secretsRemove</span>
+
+`string[]`
+
+Secret names to remove explicitly
+
+#### <span className="msb-hn">mounts</span>
+
+`VolumeMount[]`
+
+Mounts to add, built with `MountBuilder`; replaces a mount at the same guest path. Named volumes must already exist, so creation settings such as a quota are rejected, as are owned mounts. Applies on restart or next start
+
+#### <span className="msb-hn">mountsRemove</span>
+
+`string[]`
+
+Guest paths whose mounts are removed; applies on restart or next start
+
+#### <span className="msb-hn">policy</span>
+
+`"no_restart" \| "next_start" \| "restart"`
+
+`"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now
+
+#### <span className="msb-hn">dryRun</span>
+
+`boolean`
+
+Compute the plan without applying anything. Defaults to `false`
 
 ### SecretModifySpec
 

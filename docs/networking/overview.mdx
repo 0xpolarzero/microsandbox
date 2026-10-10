@@ -42,6 +42,10 @@ sb, err := m.CreateSandbox(ctx, "isolated",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("isolated", image: "python", network: :none)
+```
+
 ```bash CLI
 msb create python --name isolated --no-net
 ```
@@ -55,21 +59,19 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 `single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
 
-The per-sandbox `maxTcpConnections` setting optionally limits concurrent TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
+The per-sandbox `maxTcpConnections` setting optionally limits concurrent guest-initiated TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
 
 Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections when the limit is omitted. The current SDK rejects explicit unlimited TCP connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero TCP limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
 
 `maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
 
-Each tracked TCP socket currently allocates 64 KiB for receiving and 64 KiB for
-sending. A ceiling of 1024 therefore requires up to 128 MiB of socket-buffer
-capacity per sandbox, in addition to other runtime allocations. Reserve that
-capacity on the host when configuring a ceiling. Selecting unlimited does not
-remove memory or operating-system resource constraints. Closing sockets remain tracked
-until their TCP state permits removal. Host file descriptors and shared egress
-source ports impose additional constraints.
+`maxInboundTcpConnections` limits active inbound TCP connections across published ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Explicit overrides require runtime support or fail with an upgrade-required error. This local-only limit is separate from the listener queue (`tcpAcceptQueueSize`).
 
-For NAT64, Microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
+On 0.7.9+, finished connections leave the active budget after response delivery. The runtime retains up to 256 finished sockets in TIME-WAIT, evicting the oldest under pressure and shortening protection against delayed packets. Host writes stalled for 30 seconds are closed; successful writes restart the timer.
+
+Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.
+
+For NAT64, microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
 
 Custom NAT64 prefixes are supported only for local sandboxes. Cloud creation rejects non-default or empty prefix lists because the cloud API cannot carry this setting.
 
@@ -359,23 +361,13 @@ msb create python --name throttled \
 
 The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-ingress-bandwidth`, `--net-ingress-bandwidth-burst`, `--net-ingress-ops`, `--net-ingress-ops-burst`). Sizes accept raw bytes plus `K`, `M`, and `G` suffixes; the interval defaults to one second when omitted. A frame larger than the bandwidth bucket is delivered once and the limiter then pauses long enough to pay it off, so oversized packets are throttled instead of stuck.
 
-## What a denied HTTP request sees
+<span id="what-a-denied-http-request-sees" />
 
-Denied connections fail without an HTTP response by default. Set `http.deny_response` to `true` (`denyResponse(true)` in TypeScript) to return a readable `403 Forbidden` instead. This applies to HTTP/1.0 and HTTP/1.1 in plaintext or over HTTPS on an intercepted port (see [TLS interception](/networking/tls)). The gateway never dials upstream.
+## HTTP denial responses
 
-When enabled without a custom message, the response body is:
+By default, denied connections close without a response. Enable HTTP denial responses to return `403 Forbidden` with a message your app or agent can act on. This requires a supporting local runtime and is unavailable on cloud.
 
-```text
-This host is not allowed by the sandbox network policy config.
-
-Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
-```
-
-Enabling denial responses requires a supporting local runtime. The SDK rejects `deny_response: true` on older runtimes and on cloud. With it disabled, existing workflows need no new capability.
-
-An HTTP `403` is a response, not a connection error. Check the status in your client, or use `curl --fail` when relying on its exit code.
-
-Setting a message alone does not enable responses. Configure HTTP’s `deny_message` (`denyMessage` in TypeScript) to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
+You can customize the message and use `{host}` for the blocked hostname. Enable denial responses explicitly; setting a message alone leaves them disabled.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -384,7 +376,7 @@ await using sb = await Sandbox.builder("agent")
     .network((n) => n
         .policy(policy)
         .tls((t) => t)
-        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Ask the user to allow it.")))
     .create();
 ```
 
@@ -394,7 +386,7 @@ let sb = Sandbox::builder("agent")
     .network(|n| n
         .policy(policy)
         .tls(|t| t.enabled(true))
-        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.")))
     .create()
     .await?;
 ```
@@ -408,7 +400,7 @@ sb = await Sandbox.create(
     network=Network(
         policy=policy,
         tls=TlsConfig(),
-        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."),
+        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Ask the user to allow it."),
     ),
 )
 ```
@@ -419,7 +411,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
     m.WithNetwork(&m.NetworkConfig{
         Rules:           rules,
         TLS:             &m.TLSConfig{},
-        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."},
+        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Ask the user to allow it."},
     }),
 )
 ```
@@ -439,11 +431,31 @@ network:
   allow: [github.com]
   http:
     deny_response: true
-    deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
+    deny_message: "{host} is blocked. Ask the user to allow it."
 ```
 </CodeGroup>
 
-DNS-level denies (a name matched by a `deny` domain rule, or a deny-by-default policy without a DNS allow) still fail at resolution with `NXDOMAIN`, before any HTTP exchange. HTTPS on a port that is not intercepted, or to a name on the TLS bypass list, is closed without a response: the gateway cannot answer inside a TLS session it does not terminate. HTTP/2 and non-HTTP protocols are closed without an HTTP response. The gateway buffers fragmented request lines within a fixed size and time limit; incomplete requests, silent clients, and malformed input also close without a response.
+Check the response status, or use `curl --fail` to make a `403` return a nonzero exit code.
+
+<Accordion title="Which requests receive a response?">
+
+Responses work for HTTP/1.0 and HTTP/1.1. HTTPS requires [TLS interception](/networking/tls) on the destination port, with no bypass for the host. The denied request never reaches the upstream server.
+
+DNS denies still return `NXDOMAIN`. HTTP/2, other protocols, malformed or incomplete requests, and silent clients close without an HTTP response.
+
+</Accordion>
+
+<Accordion title="Default response message">
+
+When no custom message is set, the body names the blocked host:
+
+```text
+This host is not allowed by the sandbox network policy config.
+
+Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
+```
+
+</Accordion>
 
 ## Reaching the host
 

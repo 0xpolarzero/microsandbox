@@ -21,6 +21,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly supportsPortModification?: () => boolean;
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
@@ -303,6 +304,8 @@ export interface NapiRestoreBuilderSetters {
   portUdpBind(bind: string, host: number, guest: number): this;
   /** 1..=2147483647; omission keeps the default, 1024. */
   tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   vsock(path: string, port: number): this;
   vsockDgram(path: string, port: number): this;
 }
@@ -451,6 +454,8 @@ export interface NapiSandboxTouchResult {
 
 /** Native option object accepted by `modify()`. */
 export interface NapiSandboxModifyOptions {
+  ports?: import("../modify.js").ModifyPort[];
+  portsRemove?: import("../modify.js").ModifyPortEndpoint[];
   cpus?: number;
   maxCpus?: number;
   memoryMib?: number;
@@ -1145,6 +1150,8 @@ export interface NapiNetworkBuilder {
   maxTcpConnections(max: number): this;
   maxUdpConnections(max: number): this;
   tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;

@@ -444,6 +444,10 @@ static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
 
+bool has_port_modification(void) {
+    return lib_handle && dlsym(lib_handle, "msb_supports_port_modification") != NULL;
+}
+
 // load_error holds a static error string on dlopen/dlsym failure.
 // Not freed by callers — it lives for the process lifetime.
 static char load_error[1024] = {0};
@@ -1858,26 +1862,27 @@ type HTTPConfig struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
-	DNS                   *DNSOptions                `json:"dns,omitempty"`
-	DNSRebindProtection   *bool                      `json:"dns_rebind_protection,omitempty"`
-	DenyDomains           []string                   `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes    []string                   `json:"deny_domain_suffixes,omitempty"`
-	TLS                   *TLSOptions                `json:"tls,omitempty"`
-	Strict                *bool                      `json:"strict,omitempty"`
-	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
-	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
-	TCPAcceptQueueSize    *uint32                    `json:"tcp_accept_queue_size,omitempty"`
-	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
-	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
-	NAT64Prefixes         []string                   `json:"nat64_prefixes,omitempty"`
-	MaxConnections        *uint                      `json:"max_connections,omitempty"`
-	MaxTCPConnections     *uint                      `json:"max_tcp_connections,omitempty"`
-	MaxUDPConnections     *uint                      `json:"max_udp_connections,omitempty"`
-	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
-	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
-	HTTP                  *HTTPConfig                `json:"http,omitempty"`
+	CustomPolicy             *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                      *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection      *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains              []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes       []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                      *TLSOptions                `json:"tls,omitempty"`
+	Strict                   *bool                      `json:"strict,omitempty"`
+	Ports                    map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings             []PortBindingOptions       `json:"port_bindings,omitempty"`
+	TCPAcceptQueueSize       *uint32                    `json:"tcp_accept_queue_size,omitempty"`
+	MaxInboundTCPConnections *uint                      `json:"max_inbound_tcp_connections,omitempty"`
+	IPv4Pool                 string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool                 string                     `json:"ipv6_pool,omitempty"`
+	NAT64Prefixes            []string                   `json:"nat64_prefixes,omitempty"`
+	MaxConnections           *uint                      `json:"max_connections,omitempty"`
+	MaxTCPConnections        *uint                      `json:"max_tcp_connections,omitempty"`
+	MaxUDPConnections        *uint                      `json:"max_udp_connections,omitempty"`
+	RateLimiter              *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	SecretViolationAction    string                     `json:"secret_violation_action,omitempty"`
+	TrustHostCAs             *bool                      `json:"trust_host_cas,omitempty"`
+	HTTP                     *HTTPConfig                `json:"http,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that
@@ -6001,4 +6006,15 @@ func Jobs(ctx context.Context, sandbox uint64, request any) (json.RawMessage, er
 		return C.call_msb_jobs(cancelID, C.uint64_t(sandbox), arg, buf, length)
 	})
 	return json.RawMessage(raw), err
+}
+
+// RequirePortModification rejects requests that an older library would ignore.
+func RequirePortModification() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_port_modification()) {
+		return fmt.Errorf("published-port modification requires an updated native library")
+	}
+	return nil
 }

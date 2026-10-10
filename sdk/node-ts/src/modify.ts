@@ -85,10 +85,26 @@ export interface ModifyOptions {
   mounts?: VolumeMount[];
   /** Guest paths whose mounts are removed. Takes effect on the next start. */
   mountsRemove?: string[];
+  /** Published ports to add or update; other mappings remain unchanged. */
+  ports?: ModifyPort[];
+  /** Published host endpoints to remove. */
+  portsRemove?: ModifyPortEndpoint[];
   /** Apply policy. Defaults to `"no_restart"`. */
   policy?: ModificationPolicy;
   /** Compute the plan without applying anything. Defaults to `false`. */
   dryRun?: boolean;
+}
+
+/** A published host endpoint. Defaults to loopback TCP. */
+export interface ModifyPortEndpoint {
+  hostPort: number;
+  hostBind?: string;
+  protocol?: "tcp" | "udp";
+}
+
+/** A published port to add or update. */
+export interface ModifyPort extends ModifyPortEndpoint {
+  guestPort: number;
 }
 
 /**
@@ -210,6 +226,8 @@ export function modifyOptionsToNapi(
     secretsRemove: opts.secretsRemove,
     mounts: opts.mounts,
     mountsRemove: opts.mountsRemove,
+    ports: opts.ports,
+    portsRemove: opts.portsRemove,
     policy: opts.policy,
     dryRun: opts.dryRun,
   };

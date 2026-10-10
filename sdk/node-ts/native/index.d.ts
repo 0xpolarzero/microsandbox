@@ -564,6 +564,8 @@ export declare class NetworkBuilder {
    * 1024; the host kernel clamps it to its own somaxconn.
    */
   tcpAcceptQueueSize(size: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -846,6 +848,8 @@ export declare class RestoreBuilder {
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
   tcpAcceptQueueSize(size: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -2356,6 +2360,21 @@ export interface MemoryCacheReportJs {
   truncated: boolean
 }
 
+/** Published port to add or update. Defaults to loopback TCP. */
+export interface ModifyPort {
+  hostPort: number
+  guestPort: number
+  hostBind?: string
+  protocol?: string
+}
+
+/** Published host endpoint to remove. Defaults to loopback TCP. */
+export interface ModifyPortEndpoint {
+  hostPort: number
+  hostBind?: string
+  protocol?: string
+}
+
 export interface NetworkPolicy {
   defaultEgress: string
   defaultIngress: string
@@ -2575,6 +2594,8 @@ export interface SandboxModifyOptions {
   mounts?: Array<VolumeMount>
   /** Guest paths of the mounts to remove. */
   mountsRemove?: Array<string>
+  ports?: Array<ModifyPort>
+  portsRemove?: Array<ModifyPortEndpoint>
   policy?: string
   dryRun?: boolean
 }
@@ -2881,6 +2902,9 @@ export interface StreamOpenResult {
   /** Opaque stream handle. Pass to `streamNext()` and `streamClose()`. */
   handle: bigint
 }
+
+/** Whether this native library understands published-port modification. */
+export declare function supportsPortModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

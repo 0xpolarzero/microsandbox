@@ -86,11 +86,25 @@ type ModifyOptions struct {
 	// start.
 	MountsRemove []string
 
+	// Ports adds or updates mappings without changing other host endpoints.
+	Ports []PortBinding
+
+	// PortsRemove removes published host endpoints.
+	PortsRemove []PortEndpoint
+
 	// Policy selects the apply policy. Defaults to ModificationPolicyNoRestart.
 	Policy ModificationPolicy
 
 	// DryRun computes the plan without applying anything.
 	DryRun bool
+}
+
+// PortEndpoint identifies a published host listener. Bind defaults to loopback;
+// Protocol defaults to TCP.
+type PortEndpoint struct {
+	Bind     string
+	HostPort uint16
+	Protocol PortProtocol
 }
 
 // SecretModifySpec describes the desired state for one secret in a
@@ -187,6 +201,11 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 	if err := checkModifyMounts(opts); err != nil {
 		return nil, err
 	}
+	if len(opts.Ports) > 0 || len(opts.PortsRemove) > 0 {
+		if err := ffi.RequirePortModification(); err != nil {
+			return nil, err
+		}
+	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
@@ -203,6 +222,11 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
 	if err := checkModifyMounts(opts); err != nil {
 		return nil, err
+	}
+	if len(opts.Ports) > 0 || len(opts.PortsRemove) > 0 {
+		if err := ffi.RequirePortModification(); err != nil {
+			return nil, err
+		}
 	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
@@ -221,8 +245,18 @@ type modifyEnvVar struct {
 	Value string `json:"value"`
 }
 
+// modifyPort carries a mapping or a host endpoint in the core wire format.
+type modifyPort struct {
+	HostBind  string       `json:"host_bind"`
+	HostPort  uint16       `json:"host_port"`
+	GuestPort uint16       `json:"guest_port,omitempty"`
+	Protocol  PortProtocol `json:"protocol"`
+}
+
 // modifyPatch mirrors the core SandboxModificationPatch serde shape.
 type modifyPatch struct {
+	Ports           []modifyPort   `json:"ports,omitempty"`
+	PortsRemove     []modifyPort   `json:"ports_remove,omitempty"`
 	CPUs            *uint8         `json:"cpus,omitempty"`
 	MaxCPUs         *uint8         `json:"max_cpus,omitempty"`
 	MemoryMiB       *uint32        `json:"memory_mib,omitempty"`
@@ -298,6 +332,12 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 		EnvRemove:     opts.EnvRemove,
 		LabelsRemove:  opts.LabelsRemove,
 		SecretsRemove: opts.SecretsRemove,
+	}
+	for _, port := range opts.Ports {
+		patch.Ports = append(patch.Ports, portForModify(port.Bind, port.HostPort, port.GuestPort, port.Protocol))
+	}
+	for _, port := range opts.PortsRemove {
+		patch.PortsRemove = append(patch.PortsRemove, portForModify(port.Bind, port.HostPort, 0, port.Protocol))
 	}
 	if opts.CPUs > 0 {
 		patch.CPUs = &opts.CPUs
@@ -528,4 +568,14 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func portForModify(bind string, host, guest uint16, protocol PortProtocol) modifyPort {
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+	if protocol == "" {
+		protocol = PortProtocolTCP
+	}
+	return modifyPort{HostBind: bind, HostPort: host, GuestPort: guest, Protocol: protocol}
 }

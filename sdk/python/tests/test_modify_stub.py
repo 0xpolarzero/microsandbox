@@ -23,6 +23,8 @@ EXPECTED_KWARGS = [
     "secrets_rm",
     "mounts",
     "mounts_rm",
+    "ports",
+    "ports_rm",
     "policy",
     "dry_run",
 ]

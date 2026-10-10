@@ -977,6 +977,8 @@ impl PySandbox {
         secrets_rm = None,
         mounts = None,
         mounts_rm = None,
+        ports = None,
+        ports_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -998,13 +1000,15 @@ impl PySandbox {
         secrets_rm: Option<Vec<String>>,
         mounts: Option<Py<PyAny>>,
         mounts_rm: Option<Vec<String>>,
+        ports: Option<Py<PyAny>>,
+        ports_rm: Option<Py<PyAny>>,
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
         let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
-        let patch = build_modify_patch(
+        let mut patch = build_modify_patch(
             cpus,
             max_cpus,
             memory,
@@ -1020,6 +1024,9 @@ impl PySandbox {
             mounts,
             mounts_rm,
         );
+        patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
+        patch.ports_remove =
+            crate::helpers::modify_ports_remove(ports_rm.as_ref().map(|value| value.bind(py)))?;
         let policy = policy
             .as_ref()
             .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
@@ -1563,6 +1570,7 @@ pub(crate) fn build_modify_patch(
         secrets_remove: secrets_rm.unwrap_or_default(),
         mounts,
         mounts_remove: mounts_rm.unwrap_or_default(),
+        ..Default::default()
     }
 }
 

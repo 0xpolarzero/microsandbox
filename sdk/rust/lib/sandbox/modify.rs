@@ -2036,13 +2036,30 @@ where
     // because a start only grows the disk up to the saved size and never shrinks it.
     let previous_config_json = handle.config_json().to_owned();
     let previous_labels = handle.config()?.spec.labels;
-    let restore = persist_config_json(
-        backend,
-        handle,
-        previous_config_json,
-        previous_labels,
-        Some(saved_config_json),
-    )
+    // A start reads the saved configuration before claiming the sandbox, both under the
+    // transition guard. Restore under it too, so a start that read the changes has claimed
+    // the sandbox and the restore is refused. The guard is released before the start below.
+    let restore = async {
+        let _transition = match backend.as_local() {
+            Some(local) => Some(
+                LocalBackend::acquire_sandbox_transition_guard_with_timeout(
+                    &local.config().run_dir(),
+                    handle.name(),
+                    Some(RESTART_TRANSITION_TIMEOUT),
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        persist_config_json(
+            backend,
+            handle,
+            previous_config_json,
+            previous_labels,
+            Some(saved_config_json),
+        )
+        .await
+    }
     .await;
     match restore {
         Ok(true) => {}
@@ -7155,6 +7172,78 @@ mod tests {
         assert_eq!(start_count.into_inner(), 1);
         assert_eq!(saved.config_json(), concurrent_json);
         assert_eq!(saved.config().unwrap().spec.labels, concurrent.spec.labels);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_waits_for_a_start_that_read_the_changes_before_restoring() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let previous = config(2, 1024);
+        saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+        let run_dir = backend.as_local().unwrap().config().run_dir();
+
+        // Another start holds the transition guard, has read the saved changes, and claims the
+        // sandbox only after the first start fails.
+        let start_count = RefCell::new(0);
+        let start = |_: DiskReservations| {
+            let backend = backend.clone();
+            let run_dir = run_dir.clone();
+            let start_count = &start_count;
+            async move {
+                *start_count.borrow_mut() += 1;
+                let transition = LocalBackend::acquire_sandbox_transition_guard(&run_dir, "api")
+                    .await
+                    .unwrap();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    sandbox_entity::Entity::update_many()
+                        .col_expr(
+                            sandbox_entity::Column::Status,
+                            Expr::value(SandboxStatus::Starting),
+                        )
+                        .filter(sandbox_entity::Column::Name.eq("api"))
+                        .exec(backend.as_local().unwrap().db().await.unwrap().write())
+                        .await
+                        .unwrap();
+                    drop(transition);
+                });
+                Err(MicrosandboxError::Runtime("runtime exited".into()))
+            }
+        };
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json.clone(),
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("the sandbox or its configuration changed concurrently"),
+            "{error}"
+        );
+        assert_eq!(start_count.into_inner(), 1);
+        assert_eq!(saved.config_json(), changed_json);
     }
 
     #[cfg(unix)]

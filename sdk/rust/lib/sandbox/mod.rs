@@ -187,9 +187,9 @@ pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_types::{CpuPlacement, PullPolicy};
 #[cfg(feature = "net")]
 pub use microsandbox_types::{
-    DnsConfigPatch, HostPattern, HttpConfig, HttpConfigPatch, InterfaceOverridesPatch,
-    NetworkRateLimiterConfigPatch, SecretSubstitution, SecretViolationAction, SecretsConfigPatch,
-    TlsConfigPatch,
+    DnsConfigPatch, HostPattern, HttpConfig, HttpConfigPatch, HttpDenyResponseFormat,
+    InterfaceOverridesPatch, NetworkRateLimiterConfigPatch, SecretSubstitution,
+    SecretViolationAction, SecretsConfigPatch, TlsConfigPatch,
 };
 pub use microsandbox_types::{
     EnvVar, GuestClockPolicy, MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, NetworkSpec,
@@ -1566,6 +1566,7 @@ pub(crate) fn build_exec_request(
         .collect();
 
     ExecRequest {
+        output_window: None,
         cmd,
         args,
         env,

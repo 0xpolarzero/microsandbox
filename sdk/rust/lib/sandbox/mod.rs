@@ -1716,6 +1716,7 @@ pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
                 var.key
             )));
         }
+        init::validate_env_pair("environment variable", &var.key, &var.value)?;
     }
     Ok(())
 }

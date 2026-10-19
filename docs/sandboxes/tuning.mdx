@@ -74,7 +74,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-The result is a modification plan showing what changed and whether each change was applied. CPU and memory can take a moment to converge inside the guest. The new host limits take effect immediately, and the workload continues running.
+The result is a modification plan showing what changed and whether each change was applied. CPU and memory can take a moment to converge inside the guest. The new host limits and label take effect immediately, and the workload continues running.
 
 <span id="reserve-resize-headroom" />
 
@@ -242,7 +242,7 @@ Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective
 
 ### Update labels
 
-Labels are host-side metadata, so adding, changing, or removing one is immediate:
+Labels are host-side metadata, so adding, changing, or removing one on a running sandbox is applied live by default:
 
 <CodeGroup>
 ```bash CLI
@@ -279,7 +279,11 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Running guest processes do not change. The new labels are available to listing, selection, metrics attribution, and other host-side workflows. See [Labels](/sandboxes/labels) for naming and cardinality guidance.
+Running guest processes do not change. Lists and label filters show the new labels immediately, and [`msb-metrics`](/observability/msb-metrics) tags usage with them from its next collection. With the `next_start` policy the labels are saved, but metrics and branches keep the old labels until the sandbox starts again.
+
+<Note>Sandboxes started by v0.6.3 or earlier can't apply label changes live; use `--restart` or `--next-start`.</Note>
+
+See [Labels](/sandboxes/labels) for naming and cardinality guidance.
 
 <span id="environment-and-workdir" />
 

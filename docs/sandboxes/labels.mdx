@@ -98,6 +98,8 @@ msb modify worker --label tier=web --label-rm stale
 ```
 </CodeGroup>
 
+On a running sandbox these changes apply live by default; a stopped sandbox saves them for its next start. See [Update labels](/sandboxes/tuning#update-labels) for how lists, metrics, and the `next_start` policy pick them up.
+
 ## Select in bulk
 
 This is where labels earn their keep. Find every sandbox carrying a label, from the CLI or an SDK; pass more than one label to require all of them (AND-matched):

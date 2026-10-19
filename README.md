@@ -145,14 +145,14 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > ```sh
 > # Fork a running sandbox.
-> msb fork app --name experiment
-> msb exec experiment -- python -c "print('An independent copy!')"
+> msb fork app --name app2
+> msb exec app2 -- python -c "print('An independent copy!')"
 > ```
 >
 > ```sh
-> # Save now, resume later
-> msb snap create --sandbox app --full -o saved.msb
-> msb snap restore saved.msb --name restored
+> # Snapshot now, resume later.
+> msb snap create --sandbox app --full -o snapshot.msb
+> msb snap restore snapshot.msb --name app3
 > ```
 >
 > Forking duplicates live execution. Restoring starts from saved state; add `--cow-mem` to share unchanged memory from a full snapshot. Snapshot generations describe progression, while branches describe distinct paths through snapshot history. The old `--forked` restore flag remains a deprecated alias. See [forking and snapshots](https://docs.microsandbox.dev/sandboxes/snapshots#forking).

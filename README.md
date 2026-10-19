@@ -199,14 +199,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >     PY
 > ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
-
-> ```sh
-> msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
-> ubuntu                           # Opens Ubuntu in a microVM
-> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
-> ```
-
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
 
 > ```sh

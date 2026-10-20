@@ -87,18 +87,6 @@ Sources and checks:
 
 Required review should include golden encoded payload bytes when serialization changes. Schema snapshots protect the protocol inventory, but they do not freeze every payload's encoded representation.
 
-### Execution output backpressure
-
-Buffering is unlimited by default (`exec.buffer_bytes: null`). A configured limit
-enables generation-10 output credit. The new SDK negotiates
-support before including `output_window` or sending `core.exec.output.credit`.
-Older guests continue to receive the unchanged execution request and produce
-unthrottled output; the SDK warns only when a configured limit cannot apply to
-that connection. Older SDKs omit the window and retain their original behavior with
-new guests. No existing sandbox must restart, and no launcher, disk, catalog, or
-snapshot format changes. A new agent running behind an independently older relay
-needs separate validation because input-credit scheduling is relay-owned.
-
 ## 2. Bootstrap, Init, and Guest Runtime Contract
 
 The first current-protocol host frame is `core.bootstrap` with message ID zero and no flags. The guest then reports resolved init state, the relay installs identity mappings, the host acknowledges init, and only then may the guest become ready.
@@ -251,6 +239,8 @@ SDK and user-facing CLI catalog opens apply pending recognized migrations under 
 The upgrade transaction reserves SQLite's writer before migration reads, so concurrent lifecycle writes cannot interleave with partial schema changes. Older runtime writes may briefly wait for commit; migration duration and shutdown races need live qualification against their busy timeouts. After an upgrader exits, the next catalog opener can reclaim its dead-owner lease under the migration lock; live owners and incomplete downgrade journals still block admission. A downgrade rejected before artifact mutation retires its journal into a hidden `.cancelled-<operation-id>` directory, preserving diagnostic files without blocking ordinary commands. Once artifact mutation may have started, explicit downgrade recovery remains required.
 
 Older SDKs/CLIs may refuse to reopen the upgraded catalog because its migration history is newer; preserving their catalog access is not the same guarantee as keeping their already-running VMs alive. Catalog migrations normalize previous configuration JSON before current readers deserialize it, including the saved active configuration of already-running VMs. Unknown migration identities still fail even when their count matches a known schema. These catalog rules do not replace launcher, agent, or snapshot-format capability checks.
+
+SDK/CLI processes from v0.6.4 through v0.6.18 that opened the catalog before an upgrade rewrite `config` from a stale read on any modify with planned changes; from v0.6.9 they also rewrite the `sandbox_labels` projection. Only a modify that also makes a live CPU, memory, or secret change rewrites `active_config`. A concurrent live label change can be lost from the copies such a modify rewrites; recovery requires setting the affected label again. Of the three label copies, only `active_config` is compare-guarded, and only on a live label change; `config` and the projection remain last-writer-wins for every modify, as before.
 
 The guest-clock migration adds only a compatibility marker, so older SDKs/CLIs refuse the catalog before dropping `runtime.guest_clock`. It does not change tables, saved settings, or running VM behavior. Rolling back the marker checks raw JSON in both `config` and `active_config`; only absent, null, or explicit `sync` policies are representable by older readers. A non-default or unrecognized policy, or invalid JSON, refuses rollback without rewriting settings or removing the marker. The existing downgrade preflight runs this check before live state is changed.
 

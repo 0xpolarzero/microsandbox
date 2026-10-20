@@ -1566,7 +1566,6 @@ pub(crate) fn build_exec_request(
         .collect();
 
     ExecRequest {
-        output_window: None,
         cmd,
         args,
         env,
@@ -1716,6 +1715,7 @@ pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
                 var.key
             )));
         }
+        init::validate_env_pair("environment variable", &var.key, &var.value)?;
     }
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! Sandbox modification planning.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     sync::Arc,
     time::Duration,
@@ -366,6 +367,13 @@ impl SandboxModificationBuilder {
             self.patch.clone(),
             self.policy,
         );
+        // The plan already removes staged removals from the running sandbox; the saved
+        // configuration no longer has them.
+        let staged_removals =
+            staged_mount_removals(status, &config, active.as_ref(), &self.patch, self.policy);
+        self.patch
+            .mounts_remove
+            .retain(|guest| !staged_removals.contains(guest));
         let source_conflicts =
             mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?;
         plan.conflicts.extend(source_conflicts);
@@ -493,6 +501,13 @@ impl SandboxModificationBuilder {
             self.patch.clone(),
             self.policy,
         );
+        // The plan already removes staged removals from the running sandbox; the saved
+        // configuration no longer has them.
+        let staged_removals =
+            staged_mount_removals(status, &config, active.as_ref(), &self.patch, self.policy);
+        self.patch
+            .mounts_remove
+            .retain(|guest| !staged_removals.contains(guest));
         // Check mount sources before a restart-backed apply stops the VM.
         let source_conflicts =
             mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?;
@@ -3145,15 +3160,40 @@ fn push_mount_changes(
         return;
     }
 
-    match resolve_mount_patch(&config.spec.mounts, patch) {
+    // Removals staged earlier are already gone from the saved mounts; a restart still
+    // has to drop them from the running sandbox.
+    let staged_removals = staged_mount_removals(status, config, active, patch, policy);
+    let mut effective = Cow::Borrowed(patch);
+    if !staged_removals.is_empty() {
+        effective
+            .to_mut()
+            .mounts_remove
+            .retain(|guest| !staged_removals.contains(guest));
+    }
+
+    match resolve_mount_patch(&config.spec.mounts, &effective) {
         Ok((mounts, mut deltas)) => {
-            // Restart must activate a previously staged mount too. Next-start compares
-            // only desired state so repeated saves remain no-ops.
+            // Restart must activate a previously staged mount change too. Next-start
+            // compares only desired state so repeated saves remain no-ops.
             if policy != ModificationPolicy::NextStart
                 && running_status(status)
                 && let Some(active) = active
             {
                 deltas.extend(staged_mount_deltas(config, active, &mounts, patch));
+                for guest in &staged_removals {
+                    let running = canonical_guest_mount_path(guest).ok().and_then(|guest| {
+                        active
+                            .spec
+                            .mounts
+                            .iter()
+                            .find(|mount| mount.guest() == guest)
+                    });
+                    deltas.push(MountDelta {
+                        kind: ChangeKind::Removed,
+                        before: running.map(format_mount),
+                        after: None,
+                    });
+                }
             }
 
             // Volume removal finds a running sandbox's named volumes through its active
@@ -3189,6 +3229,35 @@ fn push_mount_changes(
             message,
         }),
     }
+}
+
+/// Requested removals (as given) of mounts a restart-backed modification of a running
+/// sandbox still has to drop: absent from the saved configuration, for example after an
+/// earlier next-start removal, but present in the running one.
+fn staged_mount_removals(
+    status: SandboxStatus,
+    config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+) -> Vec<String> {
+    let Some(active) =
+        active.filter(|_| policy != ModificationPolicy::NextStart && running_status(status))
+    else {
+        return Vec::new();
+    };
+    let has =
+        |mounts: &[VolumeMount], guest: &str| mounts.iter().any(|mount| mount.guest() == guest);
+    patch
+        .mounts_remove
+        .iter()
+        .filter(|guest| {
+            canonical_guest_mount_path(guest).is_ok_and(|guest| {
+                !has(&config.spec.mounts, &guest) && has(&active.spec.mounts, &guest)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Changes the running sandbox still lacks for requested mounts that already match the
@@ -6430,6 +6499,66 @@ mod tests {
     }
 
     #[test]
+    fn restart_activates_mount_removals_staged_for_the_next_start() {
+        // An earlier next-start modification removed `/opt/old`; the VM still mounts it.
+        let running = config_with_mounts(vec![bind_mount("/opt/old", "/host/old", false)]);
+        let saved = config_with_mounts(Vec::new());
+        let patch = SandboxModificationPatch {
+            mounts_remove: vec!["/opt/old/".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+        let plan = |status, policy, active: &SandboxConfig| {
+            build_plan(
+                "api".to_string(),
+                status,
+                &saved,
+                Some(active),
+                LiveControl::default(),
+                patch.clone(),
+                policy,
+            )
+        };
+
+        let restart = plan(
+            SandboxStatus::Running,
+            ModificationPolicy::Restart,
+            &running,
+        );
+
+        assert!(restart.conflicts.is_empty(), "{:?}", restart.conflicts);
+        let [PlannedChange::Config(change)] = restart.changes.as_slice() else {
+            panic!("expected one config change: {:?}", restart.changes);
+        };
+        assert_eq!(change.change, ChangeKind::Removed);
+        assert_eq!(
+            change.before.as_deref(),
+            Some(format_mount(&running.spec.mounts[0]).as_str())
+        );
+        assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // Without a restart of the running VM there is nothing left to remove.
+        for plan in [
+            plan(
+                SandboxStatus::Running,
+                ModificationPolicy::NextStart,
+                &running,
+            ),
+            plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::Restart,
+                &running,
+            ),
+            plan(SandboxStatus::Running, ModificationPolicy::Restart, &saved),
+        ] {
+            assert!(plan.changes.is_empty(), "{:?}", plan.changes);
+            assert!(
+                plan.conflicts[0].message.contains("no mount at /opt/old"),
+                "{:?}",
+                plan.conflicts
+            );
+        }
+    }
+
+    #[test]
     fn mount_plans_show_every_changed_option() {
         let bind = || MountBuilder::new("/data").bind("/host/data");
         let tmpfs = || MountBuilder::new("/scratch").tmpfs();
@@ -7752,6 +7881,49 @@ mod tests {
         assert_eq!(
             handle.config_json(),
             serde_json::to_string(&current).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_dry_run_plans_mount_removals_staged_for_the_next_start() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let host = base.join("old");
+        std::fs::create_dir(&host).unwrap();
+
+        // An earlier next-start modification removed the mount; the VM booted with it.
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+        let running = config_with_mounts(vec![bind_mount("/old", host.to_str().unwrap(), false)]);
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::ActiveConfig,
+                Expr::value(serde_json::to_string(&running).unwrap()),
+            )
+            .filter(sandbox_entity::Column::Name.eq(&current.spec.name))
+            .exec(backend.as_local().unwrap().db().await.unwrap().write())
+            .await
+            .unwrap();
+
+        let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts_remove: vec!["/old".to_string()],
+                ..SandboxModificationPatch::default()
+            })
+            .dry_run()
+            .await
+            .unwrap();
+
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert!(plan_requires_restart(&plan));
+        let [PlannedChange::Config(change)] = plan.changes.as_slice() else {
+            panic!("expected one config change: {:?}", plan.changes);
+        };
+        assert_eq!(
+            (change.field.as_str(), change.change),
+            ("mount", ChangeKind::Removed)
         );
     }
 

@@ -476,13 +476,23 @@ impl Sandbox {
 
     /// Plan or apply a sandbox modification. Returns the plan as a JSON
     /// string; the TS wrapper parses it into a `SandboxModificationPlan`.
-    #[napi]
-    pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
-        let builder = {
-            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-            configure_modify(sb.modify(), options.as_ref())?
-        };
-        run_modify(builder, modify_dry_run(options.as_ref())).await
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn modify<'env>(
+        &self,
+        env: &'env Env,
+        mut options: Option<SandboxModifyOptions>,
+    ) -> Result<PromiseRaw<'env, String>> {
+        // Capture local mount paths before the async operation starts.
+        capture_modify_host_paths(&mut options, self.backend_kind == "local")?;
+        let inner = self.inner.clone();
+
+        env.spawn_future(async move {
+            let builder = {
+                let sb = inner.get().await.ok_or_else(consumed_error)?;
+                configure_modify(sb.modify(), options.as_ref())?
+            };
+            run_modify(builder, modify_dry_run(options.as_ref())).await
+        })
     }
 
     /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
@@ -1200,6 +1210,22 @@ pub fn sandbox_touch_result_to_js(
         name: result.name,
         activity_seq: result.activity_seq as f64,
     }
+}
+
+/// Anchor relative `bind` and `disk` mount paths for a local backend while still
+/// on the calling thread, before the modification runs on the async runtime.
+pub(crate) fn capture_modify_host_paths(
+    options: &mut Option<SandboxModifyOptions>,
+    local: bool,
+) -> Result<()> {
+    if !local {
+        return Ok(());
+    }
+    let mounts = options.as_mut().and_then(|options| options.mounts.as_mut());
+    for mount in mounts.into_iter().flatten() {
+        mount.capture_local_host_path()?;
+    }
+    Ok(())
 }
 
 /// Inject the modify options into a core modification builder.

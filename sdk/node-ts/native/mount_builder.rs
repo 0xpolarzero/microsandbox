@@ -373,6 +373,29 @@ impl JsMountBuilder {
 }
 
 impl JsBuiltVolumeMount {
+    /// Make a relative `bind` or `disk` host path absolute against the current
+    /// working directory, so later directory changes do not retarget the mount.
+    pub(crate) fn capture_local_host_path(&mut self) -> Result<()> {
+        if !matches!(self.kind.as_str(), "bind" | "disk") {
+            return Ok(());
+        }
+        if let Some(host) = &mut self.host {
+            let path = std::path::absolute(&*host).map_err(|error| {
+                napi::Error::from_reason(format!("cannot resolve host path {host}: {error}"))
+            })?;
+            *host = path
+                .to_str()
+                .ok_or_else(|| {
+                    napi::Error::from_reason(format!(
+                        "cannot encode host path {} as UTF-8",
+                        path.display()
+                    ))
+                })?
+                .to_owned();
+        }
+        Ok(())
+    }
+
     /// Rebuild the core mount through the same builder validation as `MountBuilder`.
     ///
     /// Named volume creation settings are kept, so `modify` can refuse those it cannot apply.
@@ -756,6 +779,33 @@ mod tests {
     fn fork_volumes_anchor_relative_disk_paths_for_a_local_backend() {
         assert!(disk_host(true).is_absolute());
         assert_eq!(disk_host(false), PathBuf::from("./seed.img"));
+    }
+
+    #[test]
+    fn built_mounts_anchor_relative_bind_and_disk_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        let captured = |builder: RustMountBuilder| {
+            let mut built = to_built_mount(builder.build().unwrap());
+            built.capture_local_host_path().unwrap();
+            built.host
+        };
+
+        assert_eq!(
+            captured(RustMountBuilder::new("/code").bind("code")),
+            Some(cwd.join("code").to_str().unwrap().to_owned())
+        );
+        assert_eq!(
+            captured(RustMountBuilder::new("/disk").disk("data.raw")),
+            Some(cwd.join("data.raw").to_str().unwrap().to_owned())
+        );
+        assert_eq!(
+            captured(RustMountBuilder::new("/srv").bind("/srv/code")),
+            Some("/srv/code".to_owned())
+        );
+        assert_eq!(
+            captured(RustMountBuilder::new("/data").named("shared")),
+            None
+        );
     }
 
     #[test]

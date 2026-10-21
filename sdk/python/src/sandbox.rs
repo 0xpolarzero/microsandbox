@@ -1007,7 +1007,7 @@ impl PySandbox {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
-        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
+        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)), self.local_backend)?;
         let mut patch = build_modify_patch(
             cpus,
             max_cpus,

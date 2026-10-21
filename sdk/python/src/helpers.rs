@@ -1041,18 +1041,24 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 //--------------------------------------------------------------------------------------------------
 
 /// Convert the `mounts=` kwarg of `modify()` into mounts, sorted by guest
-/// path for deterministic patch (and plan) ordering.
-pub(crate) fn parse_mount_patches(mounts: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<VolumeMount>> {
+/// path for deterministic patch (and plan) ordering. A local backend anchors
+/// relative `bind` and `disk` paths here, before the modification runs in the
+/// background, so a later working-directory change does not retarget them.
+pub(crate) fn parse_mount_patches(
+    mounts: Option<&Bound<'_, PyAny>>,
+    local: bool,
+) -> PyResult<Vec<VolumeMount>> {
     let Some(mounts) = mounts.filter(|mounts| !mounts.is_none()) else {
         return Ok(Vec::new());
     };
 
     let mut entries = Vec::new();
     for (guest, mount) in require_mapping_dict(mounts, "mounts")?.iter() {
-        entries.push((
-            guest.extract::<String>()?,
-            config_dict(&mount, "MountConfig")?,
-        ));
+        let mount = config_dict(&mount, "MountConfig")?;
+        if local {
+            anchor_local_host_paths(&mount)?;
+        }
+        entries.push((guest.extract::<String>()?, mount));
     }
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
@@ -1082,21 +1088,28 @@ pub(crate) fn prepare_fork_volumes(
         .map(|(guest, mount)| {
             let mount = config_dict(&mount, "MountConfig")?;
             if local {
-                for key in ["bind", "disk"] {
-                    if let Some(path) = extract_opt::<String>(&mount, key)? {
-                        let path = std::path::absolute(path)?;
-                        let path = path.to_str().ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "cannot encode {key} host path as UTF-8"
-                            ))
-                        })?;
-                        mount.set_item(key, path)?;
-                    }
-                }
+                anchor_local_host_paths(&mount)?;
             }
             Ok((guest.extract()?, mount.unbind()))
         })
         .collect()
+}
+
+/// Make a mount config's relative `bind` and `disk` host paths absolute against
+/// the current working directory.
+fn anchor_local_host_paths(mount: &Bound<'_, PyDict>) -> PyResult<()> {
+    for key in ["bind", "disk"] {
+        if let Some(path) = extract_opt::<String>(mount, key)? {
+            let path = std::path::absolute(path)?;
+            let path = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "cannot encode {key} host path as UTF-8"
+                ))
+            })?;
+            mount.set_item(key, path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Apply the mounts from [`prepare_fork_volumes`] to a fork builder.

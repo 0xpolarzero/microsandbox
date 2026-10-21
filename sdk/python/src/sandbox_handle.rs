@@ -265,7 +265,10 @@ impl PySandboxHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
-        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
+        let mounts = parse_mount_patches(
+            mounts.as_ref().map(|m| m.bind(py)),
+            self.inner.backend_kind().as_str() == "local",
+        )?;
         let mut patch = crate::sandbox::build_modify_patch(
             cpus,
             max_cpus,

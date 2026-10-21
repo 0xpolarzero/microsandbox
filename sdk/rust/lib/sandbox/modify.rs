@@ -3146,7 +3146,16 @@ fn push_mount_changes(
     }
 
     match resolve_mount_patch(&config.spec.mounts, patch) {
-        Ok((mounts, deltas)) => {
+        Ok((mounts, mut deltas)) => {
+            // Restart must activate a previously staged mount too. Next-start compares
+            // only desired state so repeated saves remain no-ops.
+            if policy != ModificationPolicy::NextStart
+                && running_status(status)
+                && let Some(active) = active
+            {
+                deltas.extend(staged_mount_deltas(config, active, &mounts, patch));
+            }
+
             // Volume removal finds a running sandbox's named volumes through its active
             // configuration; without one, the desired configuration is the only record.
             let kept_volumes: Vec<&str> = named_volumes(&mounts).collect();
@@ -3180,6 +3189,45 @@ fn push_mount_changes(
             message,
         }),
     }
+}
+
+/// Changes the running sandbox still lacks for requested mounts that already match the
+/// saved configuration, such as a mount staged by an earlier next-start modification.
+/// Requested mounts that differ from the saved configuration already have a delta.
+fn staged_mount_deltas(
+    config: &SandboxConfig,
+    active: &SandboxConfig,
+    mounts: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> Vec<MountDelta> {
+    fn find<'a>(mounts: &'a [VolumeMount], guest: &str) -> Option<&'a VolumeMount> {
+        mounts.iter().find(|mount| mount.guest() == guest)
+    }
+    let mut deltas = Vec::new();
+    for requested in &patch.mounts {
+        let Ok(guest) = canonical_guest_mount_path(requested.guest()) else {
+            continue;
+        };
+        let Some(desired) = find(mounts, &guest) else {
+            continue;
+        };
+        let running = find(&active.spec.mounts, &guest);
+        if find(&config.spec.mounts, &guest).and_then(mount_json) != mount_json(desired)
+            || running.and_then(mount_json) == mount_json(desired)
+        {
+            continue;
+        }
+        deltas.push(MountDelta {
+            kind: if running.is_some() {
+                ChangeKind::Updated
+            } else {
+                ChangeKind::Added
+            },
+            before: running.map(format_mount),
+            after: Some(format_mount(desired)),
+        });
+    }
+    deltas
 }
 
 fn named_volumes(mounts: &[VolumeMount]) -> impl Iterator<Item = &str> {
@@ -6299,6 +6347,85 @@ mod tests {
                 expected == ModificationDisposition::RequiresRestart
                     && policy == ModificationPolicy::NoRestart
             );
+        }
+    }
+
+    #[test]
+    fn restart_activates_mounts_staged_for_the_next_start() {
+        // An earlier next-start modification saved these mounts; the VM still runs the old ones.
+        let running = config_with_mounts(vec![bind_mount("/opt/data", "/host/data", false)]);
+        let saved = config_with_mounts(vec![
+            bind_mount("/opt/data", "/host/data", true),
+            bind_mount("/opt/apps", "/host/apps", false),
+        ]);
+        let patch = SandboxModificationPatch {
+            mounts: vec![
+                bind_mount("/opt/data", "/host/data", true),
+                bind_mount("/opt/apps/", "/host/apps", false),
+            ],
+            ..SandboxModificationPatch::default()
+        };
+        let plan = |status, policy, active: &SandboxConfig| {
+            build_plan(
+                "api".to_string(),
+                status,
+                &saved,
+                Some(active),
+                LiveControl::default(),
+                patch.clone(),
+                policy,
+            )
+        };
+
+        let restart = plan(
+            SandboxStatus::Running,
+            ModificationPolicy::Restart,
+            &running,
+        );
+        let staged = plan(
+            SandboxStatus::Running,
+            ModificationPolicy::NextStart,
+            &running,
+        );
+        let stopped = plan(
+            SandboxStatus::Stopped,
+            ModificationPolicy::Restart,
+            &running,
+        );
+        let active = plan(SandboxStatus::Running, ModificationPolicy::Restart, &saved);
+
+        assert!(restart.conflicts.is_empty(), "{:?}", restart.conflicts);
+        let changes: Vec<_> = restart
+            .changes
+            .iter()
+            .map(|change| {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+                (change.change, change.before.clone(), change.after.clone())
+            })
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (
+                    ChangeKind::Updated,
+                    Some(format_mount(&running.spec.mounts[0])),
+                    Some(format_mount(&saved.spec.mounts[0])),
+                ),
+                (
+                    ChangeKind::Added,
+                    None,
+                    Some(format_mount(&saved.spec.mounts[1])),
+                ),
+            ]
+        );
+        assert!(plan_requires_restart(&restart));
+        // Repeated next-start saves, stopped sandboxes, and a VM already running the
+        // mounts have nothing to activate.
+        for plan in [staged, stopped, active] {
+            assert!(plan.changes.is_empty(), "{:?}", plan.changes);
         }
     }
 

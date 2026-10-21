@@ -590,6 +590,8 @@ mod tests {
     use pyo3::types::PyDict;
 
     use super::*;
+    use microsandbox::sandbox::VolumeMount;
+
     use crate::helpers::parse_mount_patches;
 
     /// Make the pure-Python SDK types importable without the native extension that
@@ -668,7 +670,7 @@ mod tests {
                     false,
                 )?,
             )?;
-            parse_mount_patches(Some(mounts.as_any()))
+            parse_mount_patches(Some(mounts.as_any()), true)
         });
 
         let json = serde_json::to_value(&mounts).unwrap();
@@ -695,12 +697,60 @@ mod tests {
     }
 
     #[test]
+    fn local_modify_mounts_anchor_relative_host_paths_when_parsed() {
+        let parse = |local| {
+            with_sdk_types(|py| {
+                let mounts = PyDict::new(py);
+                mounts.set_item(
+                    "/code",
+                    PyVolume::bind(
+                        py,
+                        "code".into(),
+                        false,
+                        false,
+                        false,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?,
+                )?;
+                mounts.set_item(
+                    "/disk",
+                    PyVolume::disk("data.raw".into(), None, None, false, false, false, false)?,
+                )?;
+                parse_mount_patches(Some(mounts.as_any()), local)
+            })
+        };
+        let hosts = |mounts: Vec<VolumeMount>| -> Vec<std::path::PathBuf> {
+            mounts
+                .into_iter()
+                .map(|mount| match mount {
+                    VolumeMount::Bind { host, .. } | VolumeMount::DiskImage { host, .. } => host,
+                    _ => panic!("expected a bind or disk mount"),
+                })
+                .collect()
+        };
+        let cwd = std::env::current_dir().unwrap();
+
+        // The modification runs later on a background task; the paths must not depend
+        // on the working directory at that point.
+        assert_eq!(hosts(parse(true)), [cwd.join("code"), cwd.join("data.raw")]);
+        // Remote backends resolve host paths on their own side.
+        assert_eq!(
+            hosts(parse(false)),
+            [std::path::PathBuf::from("code"), "data.raw".into()]
+        );
+    }
+
+    #[test]
     fn plain_dicts_are_not_accepted_as_modify_mounts() {
         with_sdk_types(|py| {
             let mounts = PyDict::new(py);
             mounts.set_item("/scratch", PyDict::new(py))?;
 
-            assert!(parse_mount_patches(Some(mounts.as_any())).is_err());
+            assert!(parse_mount_patches(Some(mounts.as_any()), true).is_err());
             Ok(())
         });
     }

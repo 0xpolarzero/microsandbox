@@ -3248,12 +3248,20 @@ fn staged_mount_removals(
     };
     let has =
         |mounts: &[VolumeMount], guest: &str| mounts.iter().any(|mount| mount.guest() == guest);
+    // A path that is also set stays in the patch, so planning refuses the overlap.
+    let set: Vec<String> = patch
+        .mounts
+        .iter()
+        .filter_map(|mount| canonical_guest_mount_path(mount.guest()).ok())
+        .collect();
     patch
         .mounts_remove
         .iter()
         .filter(|guest| {
             canonical_guest_mount_path(guest).is_ok_and(|guest| {
-                !has(&config.spec.mounts, &guest) && has(&active.spec.mounts, &guest)
+                !set.contains(&guest)
+                    && !has(&config.spec.mounts, &guest)
+                    && has(&active.spec.mounts, &guest)
             })
         })
         .cloned()
@@ -6535,6 +6543,35 @@ mod tests {
             Some(format_mount(&running.spec.mounts[0]).as_str())
         );
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // Setting the same path is still refused as an overlap.
+        let mut overlapping = patch.clone();
+        overlapping.mounts = vec![bind_mount("/opt/old", "/host/new", false)];
+        let overlap = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &saved,
+            Some(&running),
+            LiveControl::default(),
+            overlapping.clone(),
+            ModificationPolicy::Restart,
+        );
+        assert!(
+            overlap.conflicts[0]
+                .message
+                .contains("both set and removed"),
+            "{:?}",
+            overlap.conflicts
+        );
+        assert!(
+            staged_mount_removals(
+                SandboxStatus::Running,
+                &saved,
+                Some(&running),
+                &overlapping,
+                ModificationPolicy::Restart,
+            )
+            .is_empty()
+        );
         // Without a restart of the running VM there is nothing left to remove.
         for plan in [
             plan(
@@ -7884,6 +7921,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn restart_dry_run_plans_mount_removals_staged_for_the_next_start() {
         let temp = tempdir().unwrap();

@@ -798,9 +798,10 @@ mod tests {
             captured(RustMountBuilder::new("/disk").disk("data.raw")),
             Some(cwd.join("data.raw").to_str().unwrap().to_owned())
         );
+        let absolute = cwd.join("srv").to_str().unwrap().to_owned();
         assert_eq!(
-            captured(RustMountBuilder::new("/srv").bind("/srv/code")),
-            Some("/srv/code".to_owned())
+            captured(RustMountBuilder::new("/srv").bind(&absolute)),
+            Some(absolute)
         );
         assert_eq!(
             captured(RustMountBuilder::new("/data").named("shared")),

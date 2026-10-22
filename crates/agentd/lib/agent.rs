@@ -3892,8 +3892,8 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    // Check if the request already specifies PATH.
-    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+    // Entries apply in order, so the child sees the request's last PATH.
+    if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
@@ -6520,5 +6520,28 @@ mod tests {
         publish_bulk_activity(&sender, &mut pending).unwrap();
         assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
         assert_eq!(pending.fs_bytes, 0);
+    }
+
+    #[test]
+    fn scripts_dir_goes_on_the_last_path_entry() {
+        let mut req = ExecRequest {
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec!["PATH=/first".into(), "PATH=/last".into()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+        };
+        prepend_scripts_to_path(&mut req);
+        assert_eq!(
+            req.env,
+            vec![
+                "PATH=/first".to_string(),
+                format!("PATH={}:/last", microsandbox_protocol::SCRIPTS_PATH),
+            ]
+        );
     }
 }

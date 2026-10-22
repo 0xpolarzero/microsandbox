@@ -1398,17 +1398,25 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
             }
         }
     }
-    for var in &patch.env {
-        if let Some(existing) = config
+    for var in patched_env(patch) {
+        let Some(last) = config
             .spec
             .env
-            .iter_mut()
-            .find(|entry| entry.key == var.key)
-        {
-            existing.value = var.value.clone();
-        } else {
+            .iter()
+            .rposition(|entry| entry.key == var.key)
+        else {
             config.spec.env.push(var.clone());
+            continue;
+        };
+        // A key already at this value is left as is, earlier entries included.
+        if config.spec.env[last].value == var.value {
+            continue;
         }
+        // Set the last entry, the one commands see, and drop the key's earlier ones.
+        let mut rest = config.spec.env.split_off(last);
+        rest[0].value = var.value.clone();
+        config.spec.env.retain(|entry| entry.key != var.key);
+        config.spec.env.append(&mut rest);
     }
     config
         .spec
@@ -2343,8 +2351,9 @@ fn push_spec_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    for var in &patch.env {
-        let existing = config.spec.env.iter().find(|entry| entry.key == var.key);
+    // Entries apply in order, so commands see the last entry for a key.
+    for var in patched_env(patch) {
+        let existing = config.spec.env.iter().rfind(|entry| entry.key == var.key);
         if existing.is_some_and(|entry| entry.value == var.value) {
             continue;
         }
@@ -2361,7 +2370,7 @@ fn push_spec_changes(
     }
 
     for key in &patch.env_remove {
-        let Some(existing) = config.spec.env.iter().find(|entry| entry.key == *key) else {
+        let Some(existing) = config.spec.env.iter().rfind(|entry| entry.key == *key) else {
             continue;
         };
         changes.push(spec_change(
@@ -2430,6 +2439,20 @@ fn push_spec_changes(
             push_future_exec_warning(WORKDIR_FIELD, status, policy, warnings);
         }
     }
+}
+
+/// The env entries `patch` sets, one per key: a key set twice takes its last value.
+fn patched_env(patch: &SandboxModificationPatch) -> impl Iterator<Item = &EnvVar> {
+    patch
+        .env
+        .iter()
+        .enumerate()
+        .filter(|(index, var)| {
+            !patch.env[index + 1..]
+                .iter()
+                .any(|later| later.key == var.key)
+        })
+        .map(|(_, var)| var)
 }
 
 fn push_spec_conflicts(
@@ -5272,6 +5295,106 @@ mod tests {
         );
         assert!(!current.spec.labels.contains_key("team"));
         assert_eq!(current.spec.runtime.workdir.as_deref(), Some("/srv"));
+    }
+
+    #[test]
+    fn a_repeated_env_key_plans_once_against_its_last_entry() {
+        // Commands see the last entry for a key.
+        let mut current = config(2, 1024);
+        current.spec.env = vec![
+            EnvVar::new("KEY", "a"),
+            EnvVar::new("OTHER", "1"),
+            EnvVar::new("KEY", "b"),
+        ];
+        let rows = |patch: SandboxModificationPatch| -> Vec<(Option<String>, Option<String>)> {
+            build_plan(
+                "api".to_string(),
+                SandboxStatus::Stopped,
+                &current,
+                None,
+                LiveControl::default(),
+                patch,
+                ModificationPolicy::NoRestart,
+            )
+            .changes
+            .into_iter()
+            .map(|change| {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                (change.before, change.after)
+            })
+            .collect()
+        };
+        let set = |env: Vec<EnvVar>| SandboxModificationPatch {
+            env,
+            ..SandboxModificationPatch::default()
+        };
+        let row = |before: &str, after: Option<&str>| {
+            (Some(before.to_string()), after.map(str::to_string))
+        };
+
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "v")])),
+            vec![row("KEY=b", Some("KEY=v"))]
+        );
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "a")])),
+            vec![row("KEY=b", Some("KEY=a"))]
+        );
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "y")])),
+            vec![row("KEY=b", Some("KEY=y"))]
+        );
+        assert!(rows(set(vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "b")])).is_empty());
+        assert_eq!(
+            rows(SandboxModificationPatch {
+                env_remove: vec!["KEY".to_string()],
+                ..SandboxModificationPatch::default()
+            }),
+            vec![row("KEY=b", None)]
+        );
+    }
+
+    #[test]
+    fn applying_a_repeated_env_key_keeps_one_entry_with_the_new_value() {
+        let mut current = config(2, 1024);
+        current.spec.env = vec![
+            EnvVar::new("KEY", "a"),
+            EnvVar::new("OTHER", "1"),
+            EnvVar::new("KEY", "b"),
+            EnvVar::new("LAST", "1"),
+        ];
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "y")],
+            ..SandboxModificationPatch::default()
+        };
+
+        let mut changed = current.clone();
+        apply_patch_to_config(&mut changed, &patch);
+        assert_eq!(
+            changed.spec.env,
+            vec![
+                EnvVar::new("OTHER", "1"),
+                EnvVar::new("KEY", "y"),
+                EnvVar::new("LAST", "1"),
+            ]
+        );
+
+        // A key already at its value plans no change, so apply leaves its entries.
+        for env in [
+            vec![EnvVar::new("KEY", "b")],
+            vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "b")],
+        ] {
+            let mut unchanged = current.clone();
+            let patch = SandboxModificationPatch {
+                env,
+                labels: vec![("team".to_string(), "infra".to_string())],
+                ..SandboxModificationPatch::default()
+            };
+            apply_patch_to_config(&mut unchanged, &patch);
+            assert_eq!(unchanged.spec.env, current.spec.env);
+        }
     }
 
     #[test]

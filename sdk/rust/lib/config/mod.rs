@@ -35,7 +35,7 @@ use microsandbox_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::backend::Profile;
+use crate::backend::{BackendKind, Profile};
 #[cfg(feature = "local")]
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -144,6 +144,10 @@ static SDK_LIBKRUNFW_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 #[derive(Default, ConfigPatch)]
 #[config_patch(serde)]
 pub struct GlobalConfig {
+    /// Backends permitted on this device. `None` allows both; an empty list is invalid.
+    /// Managed values replace user restrictions, including an explicit null clear.
+    pub allowed_backends: Option<Vec<BackendKind>>,
+
     /// Profile selected when no backend or profile is explicitly requested.
     /// Empty or absent uses the local backend fallback.
     pub active_profile: Option<String>,
@@ -793,6 +797,7 @@ fn resolve_default_home() -> PathBuf {
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use backend::{BackendContext, ContextProfile};
 pub(crate) use registry::RegistrySettingsPatch;
 pub use registry::{
     RegistriesConfig, RegistriesConfigPatch, RegistryAuthEntry, RegistryConfig,
@@ -820,6 +825,7 @@ mod tests {
     #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
+            "allowed_backends": ["local", "cloud"],
             "active_profile": "work",
             "profiles": {"work": {
                 "backend": "cloud",

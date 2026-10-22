@@ -2734,6 +2734,7 @@ mod layering_tests {
             log_level: _,
             deployment_profile: _,
             active_profile: _,
+            allowed_backends: _,
             profiles: _,
             home: _,
             database: _,
@@ -2858,6 +2859,7 @@ mod layering_tests {
 
         // These host fields are excluded; OCI is resolved at its own stages.
         for input in [
+            json!({"allowed_backends":["cloud"]}),
             json!({"active_profile":"work"}),
             json!({"profiles":{"work":{"backend":"local"}}}),
             json!({"home":"/host"}),

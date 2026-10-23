@@ -354,6 +354,11 @@ jobs:
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
+      - name: Smoke test cloud backend in msb
+        run: |
+          MSB_BACKEND=cloud MSB_API_KEY=msb_test_ci build/msb context --format json |
+            python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "cloud"'
+
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
       - name: Upload runtime artifacts
@@ -422,7 +427,7 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1083,7 +1088,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1144,7 +1149,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1
         with:
           ruby-version: "4.0"
 
@@ -1276,7 +1281,7 @@ jobs:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: ${{ matrix.ruby }}
@@ -1347,7 +1352,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1
         with:
           ruby-version: "4.0"
 
@@ -1420,7 +1425,7 @@ jobs:
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
+      - uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1650,7 +1655,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1691,10 +1696,12 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          MSB_TEST_RUNTIME_DIR: ${{ github.workspace }}/build
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          ln -sf "libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" build/libkrunfw.so
           # Functional VM tests deliberately create multiple writable-root sandboxes. Give this
           # dedicated runner a stable admission pool so unrelated tests do not depend on its
           # momentary MemAvailable-derived pool; Auto still exercises the shipping 1536 MiB

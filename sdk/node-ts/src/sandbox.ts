@@ -12,6 +12,7 @@ import {
   modificationPlanFromJson,
   assertModifyMountsSupported,
   modifyOptionsToNapi,
+  requireModifyCapabilities,
   type ModifyOptions,
   type SandboxModificationPlan,
 } from "./modify.js";
@@ -584,9 +585,7 @@ export class Sandbox implements AsyncDisposable {
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
     assertModifyMountsSupported(opts);
-    if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
-      throw new Error("published-port modification requires an updated native library");
-    }
+    requireModifyCapabilities(opts);
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );

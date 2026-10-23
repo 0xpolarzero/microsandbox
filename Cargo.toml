@@ -52,7 +52,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.7.8"
+version = "0.7.9"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -79,22 +79,22 @@ strip = false
 # Exact (`=`) pins: these crates share private, unstable APIs across patch
 # releases, so every published version must resolve its siblings to the same
 # version. Caret would let an older release pull newer siblings and break.
-microsandbox = { version = "=0.7.8", path = "sdk/rust", default-features = false }
-microsandbox-agent-client = { version = "=0.7.8", path = "packages/agent-client/rust" }
-microsandbox-control-client = { version = "=0.7.8", path = "packages/control-client/rust" }
-microsandbox-protocol-client = { version = "=0.7.8", path = "packages/protocol-client/rust" }
-microsandbox-db = { version = "=0.7.8", path = "crates/db" }
-microsandbox-filesystem = { version = "=0.7.8", path = "crates/filesystem", default-features = false }
-microsandbox-image = { version = "=0.7.8", path = "crates/image" }
-microsandbox-metrics = { version = "=0.7.8", path = "crates/metrics" }
-microsandbox-types-macros = { version = "=0.7.8", path = "packages/microsandbox-types/macros" }
-microsandbox-types = { version = "=0.7.8", path = "packages/microsandbox-types/rust" }
-microsandbox-migration = { version = "=0.7.8", path = "crates/migration" }
-microsandbox-network = { version = "=0.7.8", path = "crates/network", default-features = false }
-microsandbox-protocol = { version = "=0.7.8", path = "crates/protocol" }
-microsandbox-runtime = { version = "=0.7.8", path = "crates/runtime", default-features = false }
-microsandbox-utils = { version = "=0.7.8", path = "crates/utils" }
-microsandbox-vsock = { version = "=0.7.8", path = "crates/vsock" }
+microsandbox = { version = "=0.7.9", path = "sdk/rust", default-features = false }
+microsandbox-agent-client = { version = "=0.7.9", path = "packages/agent-client/rust" }
+microsandbox-control-client = { version = "=0.7.9", path = "packages/control-client/rust" }
+microsandbox-protocol-client = { version = "=0.7.9", path = "packages/protocol-client/rust" }
+microsandbox-db = { version = "=0.7.9", path = "crates/db" }
+microsandbox-filesystem = { version = "=0.7.9", path = "crates/filesystem", default-features = false }
+microsandbox-image = { version = "=0.7.9", path = "crates/image" }
+microsandbox-metrics = { version = "=0.7.9", path = "crates/metrics" }
+microsandbox-types-macros = { version = "=0.7.9", path = "packages/microsandbox-types/macros" }
+microsandbox-types = { version = "=0.7.9", path = "packages/microsandbox-types/rust" }
+microsandbox-migration = { version = "=0.7.9", path = "crates/migration" }
+microsandbox-network = { version = "=0.7.9", path = "crates/network", default-features = false }
+microsandbox-protocol = { version = "=0.7.9", path = "crates/protocol" }
+microsandbox-runtime = { version = "=0.7.9", path = "crates/runtime", default-features = false }
+microsandbox-utils = { version = "=0.7.9", path = "crates/utils" }
+microsandbox-vsock = { version = "=0.7.9", path = "crates/vsock" }
 # Keep runtime APIs and shared metrics types on the same published release.
 msb_krun = "=0.1.41"
 msb_krun_utils = "=0.1.41"
@@ -148,10 +148,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_ignored = "0.1"
 serde_json = "1.0"
-serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["comments", "deserialize"] }
 sha2 = "0.11.0"
 # Temporary scheduling fix for smoltcp-rs/smoltcp#1214, based on v0.14.0.
-smoltcp = { git = "https://github.com/superradcompany/smoltcp", rev = "509a8fcae9a8aae7f1484b719a4fb29b0581ecc9", default-features = false }
+smoltcp = { package = "msb_smoltcp", version = "=0.14.0", default-features = false }
 socket2 = "0.6"
 strum = { version = "0.28", features = ["derive"] }
 tar = "0.4"
@@ -162,7 +162,7 @@ thiserror = "2.0"
 # A Ruby process may fork after the native runtime has started; inherited
 # parking_lot waiter state can reference worker threads that do not survive in
 # the child, causing the rebuilt runtime to segfault.
-tokio = { version = "1.52", features = [
+tokio = { version = "1.53.3", features = [
     "fs",
     "io-util",
     "io-std",
@@ -215,7 +215,7 @@ rustls-pki-types = "1.9"
 rustls-native-certs = "0.8"
 rustls-platform-verifier = "0.7"
 rcgen = { version = "0.14", features = ["x509-parser"] }
-lru = "0.18.0"
+lru = "0.19.0"
 parking_lot = "0.12"
 rpassword = "7"
 russh = "0.64.0"

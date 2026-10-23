@@ -218,6 +218,10 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 	if err := requireModifyCapabilities(opts); err != nil {
 		return nil, err
 	}
+	opts, err := anchorModifyMounts(opts, s.BackendKind())
+	if err != nil {
+		return nil, err
+	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
@@ -236,6 +240,10 @@ func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*Sandbo
 		return nil, err
 	}
 	if err := requireModifyCapabilities(opts); err != nil {
+		return nil, err
+	}
+	opts, err := anchorModifyMounts(opts, h.backendKind)
+	if err != nil {
 		return nil, err
 	}
 	payload, err := buildModifyRequestJSON(opts)
@@ -615,6 +623,29 @@ var modifyMountsSupported = ffi.ModifyMountsSupported
 
 // checkModifyMounts rejects mount changes when the loaded native library
 // predates them, since it would silently drop the unknown patch fields.
+// anchorModifyMounts makes relative bind and disk paths absolute before the
+// native call runs on another goroutine, so a later working-directory change
+// cannot select another host path. Only local backends read them on this host.
+func anchorModifyMounts(opts ModifyOptions, kind BackendKind) (ModifyOptions, error) {
+	if kind != BackendLocal || len(opts.Mounts) == 0 {
+		return opts, nil
+	}
+	mounts := make(map[string]MountConfig, len(opts.Mounts))
+	var cwd string
+	for guest, mount := range opts.Mounts {
+		for _, hostPath := range []*string{&mount.Bind, &mount.Disk} {
+			abs, err := localHostPath(*hostPath, &cwd)
+			if err != nil {
+				return opts, fmt.Errorf("microsandbox: resolve host path %q for mount %q: %w", *hostPath, guest, err)
+			}
+			*hostPath = abs
+		}
+		mounts[guest] = mount
+	}
+	opts.Mounts = mounts
+	return opts, nil
+}
+
 func checkModifyMounts(opts ModifyOptions) error {
 	if len(opts.Mounts) == 0 && len(opts.MountsRemove) == 0 {
 		return nil

@@ -2,6 +2,8 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -614,5 +616,45 @@ func TestSecretPolicyRequested(t *testing.T) {
 	}
 	if secretPolicyRequested(ModifyOptions{}) {
 		t.Fatalf("secretPolicyRequested must be false without secrets")
+	}
+}
+
+func TestAnchorModifyMountsCapturesLocalHostPathsOnly(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute := filepath.Join(cwd, "abs")
+	opts := ModifyOptions{Mounts: map[string]MountConfig{
+		"/data": {Bind: "rel/data"},
+		"/disk": {Disk: "rel/disk.raw"},
+		"/abs":  {Bind: absolute},
+	}}
+
+	local, err := anchorModifyMounts(opts, BackendLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := anchorModifyMounts(opts, BackendCloud)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"/data": filepath.Join(cwd, "rel/data"),
+		"/disk": filepath.Join(cwd, "rel/disk.raw"),
+		"/abs":  absolute,
+	}
+	for guest, path := range want {
+		mount := local.Mounts[guest]
+		if got := mount.Bind + mount.Disk; got != path {
+			t.Errorf("local %s: got %q, want %q", guest, got, path)
+		}
+	}
+	if remote.Mounts["/data"].Bind != "rel/data" || remote.Mounts["/disk"].Disk != "rel/disk.raw" {
+		t.Errorf("remote paths changed: %+v", remote.Mounts)
+	}
+	if opts.Mounts["/data"].Bind != "rel/data" {
+		t.Errorf("caller's options were modified: %+v", opts.Mounts)
 	}
 }

@@ -10,6 +10,8 @@
 //! client without rewriting frame headers.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(unix)]
+use std::io;
 use std::io::IoSlice;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
@@ -64,6 +66,8 @@ use microsandbox_protocol::transport::{
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
 #[cfg(test)]
 use microsandbox_types::ExecLimits;
+#[cfg(unix)]
+use microsandbox_utils::wake_pipe::WakePipe;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -2992,6 +2996,14 @@ async fn wait_for_input_stall(shared: &ConsoleSharedState, bulk: Option<&Console
     }
 }
 
+#[cfg(unix)]
+fn register_wake_pipe(pipe: &WakePipe) -> io::Result<AsyncFd<OwnedFd>> {
+    let read_fd = pipe.try_clone_read_fd()?;
+
+    // SAFETY: The owned, non-blocking descriptor stays open and unchanged until AsyncFd drops it.
+    unsafe { AsyncFd::register(read_fd) }.map_err(Into::into)
+}
+
 /// Background task that pushes client frames into the rx_ring for the guest.
 /// Retries on full ring with backoff to avoid dropping frames.
 async fn ring_writer_task(
@@ -3002,7 +3014,7 @@ async fn ring_writer_task(
 ) -> RuntimeResult<()> {
     let _lifetime = WorkloadWriterGuard(Arc::clone(&shared.workload_control));
     #[cfg(unix)]
-    let capacity_fd = match AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()) {
+    let capacity_fd = match register_wake_pipe(&shared.rx_capacity_wake) {
         Ok(fd) => fd,
         Err(error) => {
             return Err(RuntimeError::Custom(format!(
@@ -3231,7 +3243,7 @@ fn admit_control_write(
 
 async fn wait_console_capacity(
     shared: &Arc<ConsoleSharedState>,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     #[cfg(unix)]
     {
@@ -3265,7 +3277,7 @@ async fn bulk_ring_writer_task(
 ) -> RuntimeResult<()> {
     let _lifetime = WorkloadWriterGuard(Arc::clone(&workload));
     #[cfg(unix)]
-    let capacity_fd = match AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()) {
+    let capacity_fd = match register_wake_pipe(&shared.rx_capacity_wake) {
         Ok(fd) => fd,
         Err(error) => {
             return Err(RuntimeError::Custom(format!(
@@ -3533,7 +3545,7 @@ fn bulk_wire_metadata(data: &Bytes) -> RuntimeResult<(BulkKind, BulkFlow, u64, u
 async fn push_bulk_write(
     shared: &Arc<ConsoleSharedState>,
     write: BulkWrite,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     // Keep the incarnation outside the unchanged generation-8 frame. Two queue fragments avoid
     // copying the potentially megabyte-sized opaque payload merely to prepend sixteen bytes.
@@ -3571,7 +3583,7 @@ async fn push_bulk_write(
 async fn push_bulk_fragment(
     shared: &Arc<ConsoleSharedState>,
     data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
 ) -> bool {
     push_bulk_fragment_with_timeout(
         shared,
@@ -3586,7 +3598,7 @@ async fn push_bulk_fragment(
 async fn push_bulk_fragment_with_timeout(
     shared: &Arc<ConsoleSharedState>,
     data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
     timeout: std::time::Duration,
 ) -> bool {
     let mut stall = None;
@@ -3605,7 +3617,7 @@ async fn push_bulk_fragment_with_timeout(
 async fn push_bulk_fragment_with_stall<'a>(
     shared: &'a Arc<ConsoleSharedState>,
     mut data: Bytes,
-    #[cfg(unix)] capacity_fd: &AsyncFd<i32>,
+    #[cfg(unix)] capacity_fd: &AsyncFd<OwnedFd>,
     timeout: std::time::Duration,
     stall: &mut Option<InputStall<'a>>,
 ) -> bool {
@@ -4163,7 +4175,7 @@ async fn combined_ring_reader_task(
     pending_disconnects: Arc<Mutex<HashMap<ClientIncarnation, PendingClientDisconnect>>>,
 ) -> RuntimeResult<()> {
     #[cfg(unix)]
-    let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
+    let async_fd = register_wake_pipe(&shared.tx_wake).map_err(RuntimeError::Io)?;
     let output_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
     if !buf.is_empty() {
         shared.tx_wake.wake();
@@ -4252,7 +4264,7 @@ async fn lane_reader_task(
     workload: Arc<WorkloadControl>,
 ) -> RuntimeResult<()> {
     #[cfg(unix)]
-    let async_fd = AsyncFd::new(shared.tx_wake.as_raw_fd()).map_err(RuntimeError::Io)?;
+    let async_fd = register_wake_pipe(&shared.tx_wake).map_err(RuntimeError::Io)?;
     if !buf.is_empty() {
         shared.tx_wake.wake();
     }
@@ -10954,7 +10966,7 @@ mod tests {
     fn blocked_write(shared: Arc<ConsoleSharedState>) -> tokio::task::JoinHandle<bool> {
         tokio::spawn(async move {
             #[cfg(unix)]
-            let capacity = AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()).unwrap();
+            let capacity = register_wake_pipe(&shared.rx_capacity_wake).unwrap();
 
             push_bulk_fragment_with_timeout(
                 &shared,
@@ -11054,7 +11066,7 @@ mod tests {
             let writer_shared = Arc::clone(&shared);
             let writer = tokio::spawn(async move {
                 #[cfg(unix)]
-                let capacity = AsyncFd::new(writer_shared.rx_capacity_wake.as_raw_fd()).unwrap();
+                let capacity = register_wake_pipe(&writer_shared.rx_capacity_wake).unwrap();
 
                 push_bulk_fragment_with_timeout(
                     &writer_shared,

@@ -59,8 +59,8 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
-    UpperVerifyStatus, default_backend,
+    AgentBridge, BackendKind, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot,
+    SnapshotReference, UpperVerifyStatus, default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
@@ -2790,6 +2790,31 @@ fn configure_modify(
     }
 }
 
+/// Make relative bind and disk paths absolute before the async operation starts, so a later
+/// working-directory change cannot select another host path. Remote backends keep theirs.
+fn capture_modify_host_paths(
+    patch: &mut microsandbox::sandbox::SandboxModificationPatch,
+    local: bool,
+) -> Result<(), FfiError> {
+    use microsandbox::sandbox::VolumeMount;
+
+    if !local {
+        return Ok(());
+    }
+    for mount in &mut patch.mounts {
+        let (VolumeMount::Bind { host, .. } | VolumeMount::DiskImage { host, .. }) = mount else {
+            continue;
+        };
+        *host = std::path::absolute(&*host).map_err(|error| {
+            FfiError::invalid_argument(format!(
+                "cannot resolve host path {}: {error}",
+                host.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 async fn run_modify(
     builder: microsandbox::sandbox::SandboxModificationBuilder,
     dry_run: bool,
@@ -3301,8 +3326,12 @@ pub unsafe extern "C" fn msb_sandbox_handle_modify(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let name = unsafe { cstr(name) }?;
-        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let mut opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
         let policy = parse_modify_policy(opts.policy.as_deref())?;
+        capture_modify_host_paths(
+            &mut opts.patch,
+            default_backend().kind() == BackendKind::Local,
+        )?;
         Ok(Box::pin(async move {
             let h = Sandbox::get(&name).await.map_err(FfiError::from)?;
             let builder = configure_modify(h.modify(), opts.patch, policy);
@@ -3891,9 +3920,10 @@ pub unsafe extern "C" fn msb_sandbox_modify(
     buf_len: usize,
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
-        let opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
+        let mut opts = parse_sandbox_modify_opts(&unsafe { cstr(opts_json) }?)?;
         let policy = parse_modify_policy(opts.policy.as_deref())?;
         let sb = get(handle)?;
+        capture_modify_host_paths(&mut opts.patch, sb.backend_kind() == BackendKind::Local)?;
         Ok(Box::pin(async move {
             let builder = configure_modify(sb.modify(), opts.patch, policy);
             run_modify(builder, opts.dry_run).await
@@ -8218,6 +8248,52 @@ mod tests {
             }
             other => panic!("expected domain destination, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn modify_host_paths_are_captured_only_for_local_backends() {
+        use microsandbox::sandbox::{MountBuilder, SandboxModificationPatch, VolumeMount};
+
+        let patch = || SandboxModificationPatch {
+            mounts: vec![
+                MountBuilder::new("/data").bind("rel/data").build().unwrap(),
+                MountBuilder::new("/disk")
+                    .disk("rel/disk.raw")
+                    .build()
+                    .unwrap(),
+            ],
+            ..Default::default()
+        };
+        let hosts = |patch: &SandboxModificationPatch| -> Vec<std::path::PathBuf> {
+            patch
+                .mounts
+                .iter()
+                .map(|mount| match mount {
+                    VolumeMount::Bind { host, .. } | VolumeMount::DiskImage { host, .. } => {
+                        host.clone()
+                    }
+                    other => panic!("unexpected mount {other:?}"),
+                })
+                .collect()
+        };
+        let cwd = std::env::current_dir().unwrap();
+
+        let mut local = patch();
+        capture_modify_host_paths(&mut local, true).unwrap_or_else(|e| panic!("{}", e.message));
+        let mut remote = patch();
+        capture_modify_host_paths(&mut remote, false).unwrap_or_else(|e| panic!("{}", e.message));
+
+        assert_eq!(
+            hosts(&local),
+            [cwd.join("rel/data"), cwd.join("rel/disk.raw")]
+        );
+        assert_eq!(
+            hosts(&remote),
+            [
+                std::path::PathBuf::from("rel/data"),
+                std::path::PathBuf::from("rel/disk.raw")
+            ]
+        );
     }
 
     #[test]

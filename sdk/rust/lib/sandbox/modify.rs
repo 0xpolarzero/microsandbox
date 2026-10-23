@@ -2890,6 +2890,12 @@ fn resolve_mount_patch(
     patch: &SandboxModificationPatch,
 ) -> Result<(Vec<VolumeMount>, Vec<MountDelta>), String> {
     let mut mounts = current.to_vec();
+    // Older releases saved guest paths as given, such as `/data/`; match them canonically.
+    for mount in &mut mounts {
+        if let Ok(guest) = canonical_guest_mount_path(mount.guest()) {
+            *guest_of(mount) = guest;
+        }
+    }
     let mut deltas = Vec::new();
     let mut requested_guests = Vec::new();
 
@@ -6753,6 +6759,49 @@ mod tests {
             VolumeMount::Bind { host, options, .. }
                 if host == Path::new("/host/after") && options.readonly
         ));
+    }
+
+    #[test]
+    fn saved_mounts_with_non_canonical_guest_paths_can_be_replaced_or_removed() {
+        let mut saved = bind_mount("/data", "/host/before", false);
+        *guest_of(&mut saved) = "/data/".to_string();
+        let config = config_with_mounts(vec![saved]);
+        let cases = [
+            (
+                SandboxModificationPatch {
+                    mounts: vec![bind_mount("/data", "/host/after", false)],
+                    ..SandboxModificationPatch::default()
+                },
+                ChangeKind::Updated,
+                vec!["/data"],
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts_remove: vec!["/data".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                ChangeKind::Removed,
+                vec![],
+            ),
+        ];
+
+        for (patch, kind, guests) in cases {
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                &config,
+                patch.clone(),
+            );
+            let mut applied = config.clone();
+            apply_mount_patch_to_config(&mut applied, &patch).unwrap();
+
+            assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+            assert!(matches!(
+                plan.changes.as_slice(),
+                [PlannedChange::Config(change)] if change.change == kind
+            ));
+            assert_eq!(mount_guests(&applied), guests);
+        }
     }
 
     #[test]
